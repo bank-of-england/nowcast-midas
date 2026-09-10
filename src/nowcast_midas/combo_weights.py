@@ -264,7 +264,9 @@ def fit_weights(
     weights_matrix = np.full((n_rows, n_models), np.nan)
 
     # Calculate one in-sample weight vector per date. Forecasting reuses the
-    # final row for the out-of-sample forecast.
+    # final row for the out-of-sample forecast. For backseries, pseudo out of sample
+    # weights are used such that each fitted value at t is weighted by performance
+    # in the period up to t-1 (with discounting if applicable).
     for t in range(n_rows):
         fitted_available = np.isfinite(fitted_values[t])
 
