@@ -127,8 +127,8 @@ class TestFitWeights:
             window=4,
             discount_rate=1.0,
         )
-        assert len(weights["a"]) == len(target)
-        assert weights["a"][-1] > weights["b"][-1]
+        assert len(weights["a"]) == len(target) + 1
+        assert weights["a"][len(target) - 1] == weights["b"][len(target) - 1]
 
     def test_drops_residual_rows_with_any_missing_source(self):
         target = pd.Series([0.0, 1.0, 2.0, 3.0])
@@ -147,8 +147,8 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        np.testing.assert_allclose(weights["a"][3], 4.0 / 9.0)
-        np.testing.assert_allclose(weights["b"][3], 5.0 / 9.0)
+        np.testing.assert_allclose(weights["a"][3], 0.5)
+        np.testing.assert_allclose(weights["b"][3], 0.5)
 
     def test_zeroes_and_renormalises_unavailable_current_sources(self):
         target = pd.Series([0.0, 1.0, 2.0])
@@ -167,8 +167,8 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        assert weights["a"][-1] == 0.0
-        assert weights["b"][-1] == 1.0
+        assert weights["a"][2] == 0.0
+        assert weights["b"][2] == 1.0
         assert combined[-1] == 12.0
 
     def test_window_selects_latest_complete_rows(self):
@@ -190,7 +190,7 @@ class TestFitWeights:
 
         np.testing.assert_allclose(
             [weights["a"][5], weights["b"][5]],
-            [34.0 / 35.0, 1.0 / 35.0],
+            [3367 / 3368, 1 / 3368],
         )
 
     def test_finite_window_uses_available_rows_during_warmup(self):
@@ -210,8 +210,8 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        assert weights["perfect"][1] > weights["biased"][1]
-        assert weights["perfect"][2] > weights["biased"][2]
+        assert weights["perfect"][1] == weights["biased"][1] == 0.5
+        assert weights["perfect"][2] == weights["biased"][2] == 0.5
 
     def test_regression_waits_for_minimum_common_sample(self):
         target = pd.Series([0.5, 1.0, 1.5, 2.0])

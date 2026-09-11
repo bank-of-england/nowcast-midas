@@ -483,13 +483,16 @@ class MidasCombo(_ComboPlots):
     ) -> dict[str, float]:
         """Combine indicator forecasts using the OOS weight row.
 
-        Weights are shifted to application-date rows in the weighting
-        routine, so OOS step ``s`` uses row ``T + s`` (contemporaneous
-        with the forecast target step). Falls back to the last finite
-        weight if that slot is NaN.
+        ``fit_weights`` appends one extra weight row (index ``T``) per
+        horizon, estimated from the full in-sample history, for
+        out-of-sample use. Every application step/horizon reads that same
+        row; the row already varies by horizon because each horizon has
+        its own ``combo_weights_[name][h]`` array. Falls back to the last
+        finite in-sample weight if that slot is NaN (e.g. ``method='average'``,
+        whose weight arrays have no such extra row).
         """
         T = len(self.target_)
-        w_idx = T + step
+        w_idx = T
         out: dict[str, float] = {}
         # ``_combo_specs_flat`` is in dependency order (leaves first),
         # so a combo whose source is another combo can read that inner
@@ -602,9 +605,7 @@ class MidasCombo(_ComboPlots):
             available = {**oos_vals, **combo_vals}
 
             if spec_name in combo_names:
-                eff_weights = self._effective_leaf_weights(
-                    spec_name, h, T + step, available
-                )
+                eff_weights = self._effective_leaf_weights(spec_name, h, T, available)
             else:
                 # A leaf indicator model decomposes with effective weight 1.
                 eff_weights = {spec_name: 1.0}
