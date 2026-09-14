@@ -1104,25 +1104,16 @@ class MidasCombo(_ComboPlots):
         )
         source_df = _filter_sources(source_df, spec.minimum_sample_size)
 
-        target = self.target_.reindex(source_df.index)
-
         if spec.method == "average":
             combo, weights = fit_average(source_df)
-        elif spec.method == "regression":
-            combo, weights = fit_weights(
-                target,
-                source_df,
-                method=spec.estimator,
-                window=spec.window,
-                discount_rate=spec.discount_rate,
-                dummy_periods=spec.dummy_periods,
-                minimum_sample_size=spec.minimum_sample_size,
+        else:
+            weighting_method = (
+                spec.estimator if spec.method == "regression" else spec.method
             )
-        else:  # rmse / mse / mae
             combo, weights = fit_weights(
-                target,
+                self.target_,
                 source_df,
-                method=spec.method,
+                method=weighting_method,
                 window=spec.window,
                 discount_rate=spec.discount_rate,
                 dummy_periods=spec.dummy_periods,
