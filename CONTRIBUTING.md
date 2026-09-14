@@ -23,10 +23,12 @@ pip install -e ".[dev]"
 Install the pre-commit hooks:
 ```bash
 pre-commit install
+pre-commit install --hook-type commit-msg
 ```
 
 The hooks make sure everything is OK:
 
+- Conventional Commit message checks for Release Please
 - Ruff linting, with automatic fixes where possible
 - Ruff formatting
 - API documentation generation in `docs/api.md`

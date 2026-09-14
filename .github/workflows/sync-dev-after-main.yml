@@ -1,0 +1,57 @@
+name: Synchronise dev after main merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  delete:
+
+concurrency:
+  group: sync-dev-after-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-dev:
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'dev' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'delete' &&
+       github.event.ref_type == 'branch' &&
+       github.event.ref == 'dev')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: main
+
+      - name: Reset dev to main
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          dev_ref="$(git ls-remote --heads origin refs/heads/dev)"
+
+          expected_dev_sha="$MERGED_PR_HEAD_SHA"
+          if [[ -z "$dev_ref" ]]; then
+            expected_dev_sha=""
+          elif [[ "$EVENT_NAME" == 'delete' ]]; then
+            echo "dev has already been recreated; nothing to synchronise."
+            exit 0
+          fi
+
+          if ! git push --force-with-lease="refs/heads/dev:${expected_dev_sha}" \
+            origin "${main_sha}:refs/heads/dev"; then
+            echo "::error::Could not reset dev. Check for newer commits or branch restrictions, then synchronise manually."
+            exit 1
+          fi
