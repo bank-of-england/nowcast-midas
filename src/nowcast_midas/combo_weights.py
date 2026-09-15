@@ -12,10 +12,9 @@ __all__ = [
     "clipped_ols",
     "constrained_least_squares",
     "fit_average",
-    "fit_weights",
+    "fit_error_based_weights",
+    "fit_regression_weights",
 ]
-
-_REGRESSION_METHODS = frozenset({"clipped_ols", "constrained_ls"})
 
 
 def fit_average(
@@ -80,7 +79,7 @@ def _filter_sources(
     return source_fitted.loc[:, keep]
 
 
-def _equal_weights(available: np.ndarray) -> np.ndarray:
+def _give_equal_weights(available: np.ndarray) -> np.ndarray:
     """Return equal weights over the currently available sources."""
     n_available = int(available.sum())
     if n_available == 0:
@@ -88,7 +87,7 @@ def _equal_weights(available: np.ndarray) -> np.ndarray:
     return np.where(available, 1.0 / n_available, 0.0)
 
 
-def _source_error_stat(
+def _get_discounted_error_stat_at_t(
     fitted_col: np.ndarray,
     target_col: np.ndarray,
     valid_col: np.ndarray,
@@ -131,7 +130,7 @@ def _source_error_stat(
     return float(np.sqrt(stat)) if method == "rmse" else float(stat)
 
 
-def _combine_equal_and_error_weights(
+def _combine_equal_and_error_weights_at_t(
     fitted_available: np.ndarray,
     equal_weight_mask: np.ndarray,
     stats: np.ndarray,
@@ -174,132 +173,72 @@ def _combine_equal_and_error_weights(
     return weights
 
 
-def _fit_regression_weight(
+def fit_regression_weights(
+    target: pd.Series,
+    source_fitted: pd.DataFrame,
+    *,
     method: str,
-    X: np.ndarray,
-    y: np.ndarray,
-) -> np.ndarray:
-    """Dispatch to the requested regression-based weight estimator.
+    window: int | None = None,
+    dummy_periods: list | None = None,
+    minimum_sample_size: int | None = None,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Fit time-varying weights using clipped or constrained regression."""
+    if method not in ("clipped_ols", "constrained_ls"):
+        raise ValueError(f"Regression method '{method}' is not supported.")
+    if minimum_sample_size is not None and minimum_sample_size < 1:
+        raise ValueError("minimum_sample_size must be >= 1 when provided.")
 
-    ``X`` is the fitted-value matrix and ``y`` is the target vector.
-    """
-    if X.ndim != 2 or len(X) != len(y):
-        raise ValueError("X must be a 2-D array with one row for each y value.")
-    if not np.isfinite(X).all() or not np.isfinite(y).all():
-        raise ValueError("All sources must have fitted values in the fitting window.")
-
-    if method == "clipped_ols":
-        return clipped_ols(X, y)
-    if method == "constrained_ls":
-        return constrained_least_squares(X, y)
-    raise ValueError(f"Weighting method '{method}' is not supported.")
-
-
-def calculate_weight_row(
-    method: str,
-    history_fitted: np.ndarray,
-    history_target: np.ndarray,
-    dummy_slice: np.ndarray,
-    fitted_available: np.ndarray,
-    window: int | None,
-    discount_rate: float,
-    minimum_regression_rows: int,
-) -> np.ndarray:
-    """Compute one weight vector from a block of history.
-
-    Shared by the main in-sample loop (history strictly before row *t*) and
-    by the extra one-step-ahead row appended after it (history covering the
-    entire in-sample sample), so both use identical warm-up/estimation
-    logic.
-
-    Parameters
-    ----------
-    method : str
-        Weighting method.
-    history_fitted : np.ndarray
-        Fitted-value history to estimate from, shape ``(n_history, n_models)``.
-    history_target : np.ndarray
-        Target history aligned to ``history_fitted``, shape ``(n_history,)``.
-    dummy_slice : np.ndarray
-        Dummy-period mask aligned to the history rows, shape ``(n_history,)``.
-    fitted_available : np.ndarray
-        Boolean mask of sources considered available for this row.
-    window : int | None
-        Rolling window size, or ``None`` for an expanding window.
-    discount_rate : float
-        Exponential discount rate for error weighting.
-    minimum_regression_rows : int
-        Minimum jointly-complete rows required before regression weights
-        are estimated.
-
-    Returns
-    -------
-    weights : np.ndarray
-        Normalised weight vector, shape ``(n_models,)``.
-    """
-    if method in _REGRESSION_METHODS:
-        complete_history = (
-            np.isfinite(history_target)
-            & np.isfinite(history_fitted).all(axis=1)
-            & ~dummy_slice
+    names = source_fitted.columns.tolist()
+    T = len(target)
+    n_models = len(names)
+    minimum_regression_rows = (
+        n_models if minimum_sample_size is None else minimum_sample_size
+    )
+    fitted_values = source_fitted.to_numpy(dtype=float)
+    target_values = target.reindex(source_fitted.index).to_numpy(dtype=float)
+    dummy_bool = _dummy_period_mask(
+        pd.DatetimeIndex(source_fitted.index), dummy_periods
+    )
+    weights_matrix = np.full((T + 1, n_models), np.nan)
+    for t in range(T + 1):
+        if t < T:
+            fitted_available = np.isfinite(fitted_values[t])
+            if not fitted_available.any():
+                continue
+        else:
+            fitted_available = np.ones(n_models, dtype=bool)
+        if t == 0:
+            weights_matrix[t] = _give_equal_weights(fitted_available)
+            continue
+        complete = (
+            np.isfinite(target_values[:t])
+            & np.isfinite(fitted_values[:t]).all(axis=1)
+            & ~dummy_bool[:t]
         )
-        complete_indices = np.flatnonzero(complete_history)
-        if len(complete_indices) < minimum_regression_rows:
-            return _equal_weights(fitted_available)
-
-        if window is not None and len(complete_indices) > window:
-            complete_indices = complete_indices[-window:]
-
-        fitted_window = history_fitted[complete_indices]
-        target_window = history_target[complete_indices]
-
-        if len(fitted_window) == 0:
-            return _equal_weights(fitted_available)
-
-        weights = _fit_regression_weight(method, fitted_window, target_window)
+        indices = np.flatnonzero(complete)
+        if len(indices) < minimum_regression_rows:
+            weights_matrix[t] = _give_equal_weights(fitted_available)
+            continue
+        if window is not None and len(indices) > window:
+            indices = indices[-window:]
+        X = fitted_values[indices]
+        y = target_values[indices]
+        weights = (
+            clipped_ols(X, y)
+            if method == "clipped_ols"
+            else constrained_least_squares(X, y)
+        )
         weights = np.where(fitted_available, weights, 0.0)
-        weight_sum = weights.sum()
-        if weight_sum > 0:
-            return weights / weight_sum
-        return _equal_weights(fitted_available)
-
-    # mae / mse / rmse: per-source warm-up and error stats
-    valid_history = (
-        np.isfinite(history_target)[:, None]
-        & np.isfinite(history_fitted)
-        & ~dummy_slice[:, None]
-    )
-    counts = valid_history.sum(axis=0)
-    if window is not None:
-        equal_weight_mask = fitted_available & (counts < window)
-    else:
-        equal_weight_mask = np.zeros(len(fitted_available), dtype=bool)
-    error_weighted_mask = fitted_available & ~equal_weight_mask
-
-    error_weighted_stats = np.full(len(fitted_available), np.nan)
-    for m in np.flatnonzero(error_weighted_mask):
-        valid_col = (
-            np.isfinite(history_target)
-            & np.isfinite(history_fitted[:, m])
-            & ~dummy_slice
+        total = weights.sum()
+        weights_matrix[t] = (
+            weights / total if total > 0 else _give_equal_weights(fitted_available)
         )
-        error_weighted_stats[m] = _source_error_stat(
-            history_fitted[:, m],
-            history_target,
-            valid_col,
-            window,
-            discount_rate,
-            method,
-        )
-
-    return _combine_equal_and_error_weights(
-        fitted_available,
-        equal_weight_mask,
-        error_weighted_stats,
+    return _calculate_combined_series_using_weights(
+        fitted_values, weights_matrix, names
     )
 
 
-def fit_weights(
+def fit_error_based_weights(
     target: pd.Series,
     source_fitted: pd.DataFrame,
     *,
@@ -307,139 +246,77 @@ def fit_weights(
     window: int | None = None,
     discount_rate: float = 1.0,
     dummy_periods: list | None = None,
-    minimum_sample_size: int | None = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Fit time-varying weights for error- or regression-based combination.
-
-    For error-weighted methods, at each time *t* the weight for model *m* is
-    proportional to the inverse of its discounted error statistic computed
-    over the latest complete residual rows before *t*.
-    Residuals are model-specific (``target - source_fitted.iloc[:, m]``),
-    using whichever source forecast table the caller provides.
-
-    For error-weighted methods (``'mae'``, ``'mse'``, ``'rmse'``), each
-    source's warm-up is evaluated independently: a source with fewer than
-    ``window`` of its own usable historical rows receives an equal share
-    ``1 / n_available`` at that date, regardless of how long its peers'
-    histories are. Sources with at least ``window`` usable rows have their
-    error statistic computed from their own most recent ``window`` rows,
-    and the probability mass left over after the equal-weighted sources
-    are accounted for is split between them in proportion to inverse
-    error.
-
-    Regression-based methods (``'clipped_ols'``, ``'constrained_ls'``)
-    keep the existing joint-row estimation sample and use equal weights
-    until ``minimum_sample_size`` jointly-complete rows exist.
-    Models whose fitted value is NaN at *t* receive zero weight.
-
-    Parameters
-    ----------
-    target : pd.Series
-        Target values.
-    source_fitted : pd.DataFrame
-        Fitted value matrix with source names as column names.
-    method : str
-        Error metric for weighting.
-    window : int | None
-        Lookback window size for computing weights.
-    discount_rate : float
-        Discount factor for exponential weighting (0 < value < 1).
-    dummy_periods : list | None
-        Quarters to exclude from the error statistic computation.
-        These rows are masked out of the residual window so that
-        outlier quarters (e.g. COVID) do not distort the weights.
-        Default is None (no exclusions).
-    minimum_sample_size : int | None
-        Minimum number of complete common rows required before regression
-        based weights are estimated. Error weighted methods do not require
-        this warm-up threshold; their warm-up is instead governed
-        per-source by ``window``.
-
-    Returns
-    -------
-    combined : np.ndarray
-        Time-varying weighted combination, shape ``(T,)``.
-    weights : dict[str, np.ndarray]
-        Source names to weight arrays of shape ``(T + 1,)``. Rows
-        ``0..T-1`` are the in-sample weights described above. Row ``T`` is
-        an extra one-step-ahead weight, estimated from the *entire*
-        in-sample history (rows ``0..T-1``), for `forecast()` to use on
-        the out-of-sample step rather than reusing the stale row ``T-1``.
-
-    Raises
-    ------
-    ValueError
-        If *minimum_sample_size* is less than 1 or a weighting method
-        receives invalid input.
-    """
+    """Fit time-varying inverse-error weights using MAE, MSE, or RMSE."""
+    if method not in ("mae", "mse", "rmse"):
+        raise ValueError(f"Error weighting method '{method}' is not supported.")
     names = source_fitted.columns.tolist()
     T = len(target)
-    n_models = len(names)
-
-    if minimum_sample_size is not None and minimum_sample_size < 1:
-        raise ValueError("minimum_sample_size must be >= 1 when provided.")
-
-    minimum_regression_rows = (
-        n_models if minimum_sample_size is None else minimum_sample_size
-    )
-
     fitted_values = source_fitted.to_numpy(dtype=float)
     target_values = target.reindex(source_fitted.index).to_numpy(dtype=float)
-
-    # Exclude dummy periods from the error-estimation sample.
     dummy_bool = _dummy_period_mask(
         pd.DatetimeIndex(source_fitted.index), dummy_periods
     )
-
-    n_rows = T
-    # Row T (appended after the loop) is an extra one-step-ahead weight,
-    # estimated from the entire in-sample history, for out-of-sample use.
-    weights_matrix = np.full((n_rows + 1, n_models), np.nan)
-
-    # Calculate one in-sample weight vector per date, plus one final row for
-    # the next out-of-sample forecast. At row t, only rows before t may be
-    # used to estimate the weights, so the OOS row t == T uses all in-sample
-    # history without introducing look-ahead bias.
-    for t in range(n_rows + 1):
-        if t < n_rows:
+    weights_matrix = np.full((T + 1, len(names)), np.nan)
+    for t in range(T + 1):
+        if t < T:
             fitted_available = np.isfinite(fitted_values[t])
             if not fitted_available.any():
                 continue
         else:
-            # No next-period fitted values exist yet. Assume all surviving
-            # sources are candidates; the OOS consumer masks unavailable
-            # forecasts and renormalises the applicable weights later.
-            fitted_available = np.ones(n_models, dtype=bool)
-
+            fitted_available = np.ones(len(names), dtype=bool)
         if t == 0:
-            weights_matrix[t] = _equal_weights(fitted_available)
+            weights_matrix[t] = _give_equal_weights(fitted_available)
             continue
-
-        weights_matrix[t] = calculate_weight_row(
-            method,
-            fitted_values[:t],
-            target_values[:t],
-            dummy_bool[:t],
-            fitted_available,
-            window,
-            discount_rate,
-            minimum_regression_rows,
+        valid_history = (
+            np.isfinite(target_values[:t])[:, None]
+            & np.isfinite(fitted_values[:t])
+            & ~dummy_bool[:t, None]
         )
-
-    # Combine -----------------------------------------------------------------
-    # Apply each in-sample weight row to its fitted values.
-    fitted_safe = np.where(np.isnan(fitted_values), 0.0, fitted_values)
-
-    weights_safe = np.where(np.isnan(weights_matrix), 0.0, weights_matrix)
-
-    combined = np.where(
-        np.any(np.isfinite(weights_matrix[:T]), axis=1),
-        (weights_safe[:T] * fitted_safe).sum(axis=1),
-        np.nan,
+        counts = valid_history.sum(axis=0)
+        equal_mask = (
+            fitted_available & (counts < window)
+            if window is not None
+            else np.zeros(len(names), dtype=bool)
+        )
+        weighted_mask = fitted_available & ~equal_mask
+        stats = np.full(len(names), np.nan)
+        for m in np.flatnonzero(weighted_mask):
+            valid_col = (
+                np.isfinite(target_values[:t])
+                & np.isfinite(fitted_values[:t, m])
+                & ~dummy_bool[:t]
+            )
+            stats[m] = _get_discounted_error_stat_at_t(
+                fitted_values[:t, m],
+                target_values[:t],
+                valid_col,
+                window,
+                discount_rate,
+                method,
+            )
+        weights_matrix[t] = _combine_equal_and_error_weights_at_t(
+            fitted_available, equal_mask, stats
+        )
+    return _calculate_combined_series_using_weights(
+        fitted_values, weights_matrix, names
     )
 
-    weights_dict = {name: weights_safe[:, m] for m, name in enumerate(names)}
-    return combined, weights_dict
+
+def _calculate_combined_series_using_weights(
+    fitted_values: np.ndarray,
+    weights_matrix: np.ndarray,
+    names: list[str],
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Calculate the combined fitted series using the source weights."""
+    fitted_safe = np.where(np.isnan(fitted_values), 0.0, fitted_values)
+    weights_safe = np.where(np.isnan(weights_matrix), 0.0, weights_matrix)
+    combined_fitted = np.where(
+        np.any(np.isfinite(weights_matrix[:-1]), axis=1),
+        (weights_safe[:-1] * fitted_safe).sum(axis=1),
+        np.nan,
+    )
+    return combined_fitted, {name: weights_safe[:, m] for m, name in enumerate(names)}
 
 
 def clipped_ols(

@@ -61,7 +61,7 @@ on each date, with weights renormalised over those sources.
 
 The second layer pools the Layer-1 combo with a quarterly hard
 regressor via constrained regression
-([`fit_weights`](../api.md#nowcast_midas.combo_weights.fit_weights)) with
+([`fit_regression_weights`](../../api.md#nowcast_midas.combo_weights.fit_regression_weights)) with
 `method='constrained_ls'`:
 
 $$

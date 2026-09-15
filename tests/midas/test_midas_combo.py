@@ -726,7 +726,7 @@ def test_mixed_estimators_recover_each_nowcast_vintage(vintage_index):
     model.fit(vintage.target_train, vintage.regressors)
     forecasts = model.forecast()
 
-    assert model.leaf_forecast_horizons_ == {
+    assert model.indicator_forecast_horizons_ == {
         name: [horizon] for name, horizon in vintage.horizons.items()
     }
     target = vintage.target_train[["date", "value"]]

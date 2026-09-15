@@ -55,7 +55,8 @@ def test_supported_submodule_exports_are_explicit():
     }
     assert set(combo_weights_all) == {
         "fit_average",
-        "fit_weights",
+        "fit_error_based_weights",
+        "fit_regression_weights",
         "clipped_ols",
         "constrained_least_squares",
     }
