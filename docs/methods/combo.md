@@ -91,8 +91,9 @@ decay geometrically.
 
 The function is called once for each direct forecasting horizon, after the
 horizon-specific source fits have been selected. It returns in-sample weight
-rows only; `forecast()` reuses the final in-sample row for the out-of-sample
-forecast.
+rows only. For each fitted value at t, the corresponding weight at t is
+based on prior performance up to and including t-1. For true out-of-sample
+projections, `forecast()` reuses the final in-sample weight row.
 
 `window=None` uses an expanding window from the first observation,
 which is the typical Layer-2 set-up. During warm-up, error weighted methods

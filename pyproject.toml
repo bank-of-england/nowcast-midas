@@ -39,6 +39,7 @@ docs = [
 
 dev = [
     "nowcast-midas[docs]",
+    "conventional-pre-commit>=4.4.0",
     "pre-commit",
     "pydoclint",
     "ruff",
