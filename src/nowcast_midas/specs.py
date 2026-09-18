@@ -340,12 +340,6 @@ class ComboSpec:
     discount_rate : float
         Exponential discount rate for error weighting.
         Default is 1.0 (no discounting).
-    estimation_start : pd.Timestamp or None
-        Optional lower bound date for the regression estimation sample.
-        Only applicable when ``method='regression'``. Default is None.
-    estimation_end : pd.Timestamp or None
-        Optional upper bound date for the regression estimation sample.
-        Only applicable when ``method='regression'``. Default is None.
     estimator : str
         Weight estimation method when ``method='regression'``.
         Either ``'constrained_ls'`` (default) or ``'clipped_ols'``.
@@ -369,10 +363,6 @@ class ComboSpec:
         Minimum finite sample size for a source.
     discount_rate : float
         Exponential discount rate for error weighting.
-    estimation_start : pd.Timestamp | None
-        Lower date bound for regression estimation.
-    estimation_end : pd.Timestamp | None
-        Upper date bound for regression estimation.
     estimator : str
         Regression weight estimator.
     dummy_periods : list[pd.Timestamp] | None
@@ -387,8 +377,6 @@ class ComboSpec:
     window: int | None = None
     minimum_sample_size: int = 10
     discount_rate: float = 1.0
-    estimation_start: pd.Timestamp | None = None
-    estimation_end: pd.Timestamp | None = None
     estimator: str = "constrained_ls"
     dummy_periods: list[pd.Timestamp] | None = None
 
@@ -398,13 +386,6 @@ class ComboSpec:
         if self.minimum_sample_size < 1:
             raise ValueError("minimum_sample_size must be >= 1.")
 
-        if self.method != "regression" and (
-            self.estimation_start is not None or self.estimation_end is not None
-        ):
-            raise ValueError(
-                "estimation_start/estimation_end are only applicable to "
-                "method='regression'."
-            )
         if self.method != "regression" and self.estimator != "constrained_ls":
             raise ValueError("estimator is only applicable to method='regression'.")
         if self.estimator not in ("constrained_ls", "clipped_ols"):
@@ -412,13 +393,6 @@ class ComboSpec:
                 f"estimator must be 'constrained_ls' or 'clipped_ols', "
                 f"got {self.estimator!r}"
             )
-        if (
-            self.estimation_start is not None
-            and self.estimation_end is not None
-            and pd.Timestamp(self.estimation_start) > pd.Timestamp(self.estimation_end)
-        ):
-            raise ValueError("estimation_start must be <= estimation_end.")
-
         if self.dummy_periods is not None:
             if self.method == "average":
                 raise ValueError("dummy_periods is not applicable to method='average'.")

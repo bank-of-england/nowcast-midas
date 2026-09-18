@@ -86,11 +86,6 @@ def test_combo_spec_minimum_sample_size_type_and_range():
         ComboSpec("c", minimum_sample_size=0)
 
 
-def test_combo_spec_estimation_bounds_only_for_regression():
-    with pytest.raises(ValueError, match="method='regression'"):
-        ComboSpec("c", method="mse", estimation_start=pd.Timestamp("2020-01-01"))
-
-
 def test_combo_spec_estimator_only_for_regression():
     with pytest.raises(ValueError, match="only applicable to method='regression'"):
         ComboSpec("c", method="average", estimator="clipped_ols")
@@ -99,16 +94,6 @@ def test_combo_spec_estimator_only_for_regression():
 def test_combo_spec_unknown_estimator_raises():
     with pytest.raises(ValueError, match="constrained_ls.*clipped_ols"):
         ComboSpec("c", method="regression", estimator="ridge")
-
-
-def test_combo_spec_estimation_start_after_end_raises():
-    with pytest.raises(ValueError, match="estimation_start must be <="):
-        ComboSpec(
-            "c",
-            method="regression",
-            estimation_start=pd.Timestamp("2021-01-01"),
-            estimation_end=pd.Timestamp("2020-01-01"),
-        )
 
 
 def test_combo_spec_dummy_periods_not_allowed_for_average():
