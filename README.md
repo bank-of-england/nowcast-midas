@@ -83,8 +83,7 @@ print(oos.head())
 model.summary(horizon=0)  # prints and returns the text
 ```
 
-This is the same example as [`docs/index.md`](docs/index.md); runnable end-to-end
-scripts are in [`examples/`](examples/) and rendered in
+This is the same example as [`docs/index.md`](docs/index.md); runnable end-to-end scripts are in [`examples/`](examples/) and rendered in
 [Worked examples](docs/examples/core_models.md).
 
 ## Selected documentation
