@@ -43,25 +43,20 @@ combination weights are derived from rolling-window residuals.  Three
 inverse-error variants are available (mean absolute error, mean squared
 error, root mean squared error) plus equal-weight average.
 
-For inverse-MSE, the weight of source $m$ at time $t$ is the normalised
-inverse of its discounted squared-error statistic $S^{(m)}_t$ — defined once
-in [Weighting schemes](combo.md#mae-mse-rmse) and evaluated here with $p = 2$.
-Complete common rows are selected before the window is applied, so a finite
-window contains exactly $W$ = `window` comparable observations once it is
-full. Error weighted combinations use available complete rows during warm-up;
-regression combinations receive equal weight $1/n$ until `minimum_sample_size`
-complete rows exist.
+Each source uses its own prior residuals. Lower errors receive more weight;
+`window` selects how many residuals to use and `discount_rate` controls the
+influence of older errors. With a finite window, sources without enough
+residuals receive an equal share. See [Weighting schemes](combo.md#mae-mse-rmse)
+for the calculation and observation-count rules.
 
-Before this row-level calculation, sources with fewer than
-`minimum_sample_size` finite fitted observations are removed. The default
-is `10`; the remaining sources are combined using whichever are available
-on each date, with weights renormalised over those sources.
+`minimum_sample_size` excludes sources with too few finite fitted observations
+before weighting. The default is `10`.
 
 ### 3. Layer 2 — soft × hard merging
 
 The second layer pools the Layer-1 combo with a quarterly hard
 regressor via constrained regression
-([`fit_regression_weights`](../../api.md#nowcast_midas.combo_weights.fit_regression_weights)) with
+([`fit_regression_weights`](../api.md#nowcast_midas.combo_weights.fit_regression_weights)) with
 `method='constrained_ls'`:
 
 $$

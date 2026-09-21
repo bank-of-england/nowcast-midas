@@ -50,108 +50,87 @@ This matches the EViews `polynomial=p` parameterisation exactly.
 
 ## Combination weights
 
-Each non-leaf `ComboSpec` produces a time-varying weight vector
-$\mathbf{w}_t \in \Delta^{n-1}$ (the unit simplex) over its sources.
-Combined fits are then
+Choose a `ComboSpec.method`:
+
+| Method | Weighting | Typical use |
+|---|---|---|
+| `average` | Equal weights | Baseline combination |
+| `mae` | Inverse mean absolute error | Less emphasis on large errors than MSE |
+| `mse` | Inverse mean squared error | Pooling monthly indicators |
+| `rmse` | Inverse root mean squared error | Less concentrated weights than MSE |
+| `regression` | Joint least-squares fit | Combining a pooled indicator with quarterly data |
+
+Weights are non-negative and sum to one over available sources:
 
 $$
 \hat y_t = \sum_{m=1}^{n} w^{(m)}_t\, \hat y^{(m)}_t.
 $$
 
-The available `method` values are:
+Error and regression weights are estimated separately for each horizon.
+Fitted values use weights based on earlier observations; forecasts use weights
+estimated through the final observation, subject to the chosen window.
 
 ### `'average'`
 
-Equal weight on every source that is non-NaN at $t$:
-
-$$
-w^{(m)}_t \;=\; \mathbb{1}\{\hat y^{(m)}_t \in \mathbb{R}\}
-   \,\big/\, n_{\text{avail}}(t).
-$$
+Each available source receives weight $1/n$, where $n$ is the number of
+available sources.
 
 ### `'mae'`, `'mse'`, `'rmse'`
 
-Inverse-error weighting with an exponential discount on past residuals. Rows
-containing a missing value in any source are removed before the latest $W$
-complete rows are selected; $C_t$ is that common sample. The source weight is
-the normalised inverse of a discounted error statistic:
+Sources with smaller past errors receive more weight. Each source uses its
+own prior residuals, excluding missing targets, missing fitted values, and
+`dummy_periods`.
+
+- `window=W`: use the latest $W$ usable residuals per source.
+- `window=None`: use all usable prior residuals.
+- `discount_rate`: set to `1` for equal treatment of past residuals, or between
+  `0` and `1` to give older residuals less influence.
+
+For selected dates $s_1 < \dots < s_{N_m}$ and discount
+$\delta =$ `discount_rate`, the error statistic is:
 
 $$
-S^{(m)}_t \;=\; \frac{1}{|C_t|} \sum_{s \in C_t}
-   \delta^{\,t-s}\, \bigl|\,y_s - \hat y^{(m)}_s\,\bigr|^{p},
-\qquad
-w^{(m)}_t \;=\; \frac{1/S^{(m)}_t}{\sum_{m'} 1/S^{(m')}_t},
+S^{(m)}_t \;=\; \frac{1}{N_m} \sum_{j=1}^{N_m}
+   \delta^{\,N_m-j}\, \bigl|\,y_{s_j} - \hat y^{(m)}_{s_j}\,\bigr|^{p}.
 $$
 
-with $p = 1$ for `mae`, $p = 2$ for `mse` / `rmse` (`rmse` takes $\sqrt{S}$
-before inverting), discount $\delta$ = `discount_rate` $\in (0, 1]$, and
-window $|C_t| \le W$ = `window` (equal to `window` once the window is full).
-The most recent residual carries weight $\delta^{0} = 1$; older residuals
-decay geometrically.
+Use $p=1$ for `mae` and $p=2$ for `mse` or `rmse`. Weights are proportional
+to $1/S$ for `mae` and `mse`, or $1/\sqrt{S}$ for `rmse`.
 
-The function is called once for each direct forecasting horizon, after the
-horizon-specific source fits have been selected. It returns in-sample weight
-rows only. For each fitted value at t, the corresponding weight at t is
-based on prior performance up to and including t-1. For true out-of-sample
-projections, `forecast()` reuses the final in-sample weight row.
+With `window=W`, an available source with fewer than $W$ usable prior
+residuals receives $1/n$. Sources with at least $W$ residuals divide the
+remaining weight in proportion to inverse error.
 
-`window=None` uses an expanding window from the first observation,
-which is the typical Layer-2 set-up. During warm-up, error weighted methods
-use the available complete common rows. Regression methods use equal weights
-until `minimum_sample_size` complete common rows exist.
+For example, with `window=8` and three available sources, a source with only
+five residuals receives $1/3$. The other two share $2/3$ according to their
+errors, provided each has at least eight residuals.
+
+Use a finite window when sources start at different dates: expanding error
+windows can produce missing combinations when a source has no prior residuals.
 
 ### `'regression'`
 
-Constrained least squares with non-negativity and sum-to-one
-constraints:
+Choose weights jointly to minimise the combined squared error:
 
 $$
 \hat{\mathbf w}_t \;=\; \arg\min_{\mathbf w \,\ge\, 0,\; \mathbf{1}^{\!\top}\mathbf w = 1}
-   \sum_{s=t-W+1}^{t}\bigl( y_s - \mathbf w^{\!\top} \hat{\mathbf y}_s\bigr)^2.
+   \sum_{s \in C_t}\bigl( y_s - \mathbf w^{\!\top} \hat{\mathbf y}_s\bigr)^2.
 $$
 
-Solved by [`constrained_least_squares`](../api.md#nowcast_midas.combo_weights.constrained_least_squares)
-(the `estimator="constrained_ls"` default): Levenberg-Marquardt on a
-softmax reparameterization $\mathbf w = \mathrm{softmax}(\mathbf z)$ with
-an analytical Jacobian, so the constraints hold by construction.  With
-exactly two sources this reduces to a convex combination
-$w_1 \in [0, 1]$, $w_2 = 1 - w_1$, matching the EViews soft-vs-hard
-merge equation.
+The sample $C_t$ contains prior rows with a finite target and fitted values
+for every retained source, excluding `dummy_periods`. Set `window=W` for the
+latest $W$ common rows, or `window=None` for all common rows.
 
-Passing `estimator="clipped_ols"` instead uses
-[`clipped_ols`](../api.md#nowcast_midas.combo_weights.clipped_ols): plain OLS,
-weights clipped to $[0, 1]$ and renormalized to sum to one. This method
-avoids iterative optimisation, which makes it faster but less stable on
-ill-conditioned designs.
-
-The regression sample can be restricted with `estimation_start` /
-`estimation_end`, and `window=None` triggers an expanding window covering
-the full sample.
-
-## Which to pick?
-
-* **Layer 1 (soft pooling):** `'mse'` or `'rmse'` with a moderate
-  rolling window (e.g. `window=8`, `discount_rate=0.95`).  This gives
-  more weight to indicators with recently low forecast errors and
-  reacts smoothly to regime changes.
-* **Layer 2 (soft × hard):** `'regression'` with `window=None`.  The
-  expanding window uses the whole sample to estimate one stable mixing
-  weight between soft signal and hard data, matching the EViews
-  convention.
-* **Average:** baseline for diagnostics — useful when you want to
-  isolate the gain from error weighting.
+- `estimator="constrained_ls"` (default): solve with non-negative weights that
+   sum to one. Set `minimum_sample_size` and any finite `window` at least as
+   large as the number of retained sources.
+- `estimator="clipped_ols"`: fit OLS, clip weights to $[0,1]$, then normalise.
 
 ## Minimum sample size (`minimum_sample_size`)
 
-`MidasSpec`, `OLSSpec`, and `MultiMidasSpec` accept a
-`minimum_sample_size` argument (default `None`). When set, a source model is considered
-insufficient for forecasting until it has that many **fitted quarterly
-observations**. This prevents early, poorly estimated models from
-entering a combination during the warm-up period.
+On `MidasSpec`, `OLSSpec`, and `MultiMidasSpec`, this sets the required number
+of fitted quarterly observations. The default, `None`, adds no threshold.
 
-`ComboSpec` uses the same argument, defaulting to `10`, to remove sources
-with fewer than this many finite fitted observations before combination
-rows are filtered. For regression combinations, it also prevents weight
-estimation until the common sample reaches this size. The remaining sources
-can still be missing on individual dates; those dates use the available
-sources and renormalise their weights.
+On `ComboSpec`, the default is `10`. Sources with fewer finite fitted values
+are excluded. Regression combinations also use equal weights until the prior
+common history reaches this count, before applying `window`.

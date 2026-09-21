@@ -119,8 +119,6 @@ final = ComboSpec(
     method="regression",
     window=None,
     estimator="constrained_ls",  # 'constrained_ls' (default) or 'clipped_ols'
-    estimation_start=None,  # optional pd.Timestamp lower bound for regression sample
-    estimation_end=None,  # optional pd.Timestamp upper bound for regression sample
 )
 ```
 
