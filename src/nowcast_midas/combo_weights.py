@@ -135,12 +135,12 @@ def _combine_equal_and_error_weights_at_t(
     equal_weight_mask: np.ndarray,
     stats: np.ndarray,
 ) -> np.ndarray:
-    """Combine equal weights for warm sources with inverse-error weights.
+    """Combine equal weights for sources with incomplete error histories.
 
-    Sources still inside their discount-window warm-up period receive an
-    equal share ``1 / n_total`` of the available sources. The remaining
-    probability mass is split among the sources past warm-up, proportional
-    to their inverse error statistic, so the full vector sums to 1.
+    Sources with fewer than the required number of residuals receive an equal
+    share ``1 / n_total`` of the available sources. The remaining probability
+    mass is split among the other sources, proportional to their inverse error
+    statistic, so the full vector sums to 1.
 
     Parameters
     ----------
@@ -191,6 +191,8 @@ def fit_regression_weights(
     names = source_fitted.columns.tolist()
     T = len(target)
     n_models = len(names)
+    if n_models == 0:
+        return np.full(T, np.nan), {}
     minimum_regression_rows = (
         n_models if minimum_sample_size is None else minimum_sample_size
     )
@@ -277,7 +279,7 @@ def fit_error_based_weights(
         equal_mask = (
             fitted_available & (counts < window)
             if window is not None
-            else np.zeros(len(names), dtype=bool)
+            else fitted_available & (counts == 0)
         )
         weighted_mask = fitted_available & ~equal_mask
         stats = np.full(len(names), np.nan)
@@ -341,6 +343,8 @@ def clipped_ols(
         Non-negative weights clipped to [0, 1] and summing to 1.
     """
     n_sources = X.shape[1]
+    if n_sources == 0:
+        return np.empty(0, dtype=float)
     if len(y) == 0:
         return np.full(n_sources, np.nan, dtype=float)
 
@@ -384,6 +388,8 @@ def constrained_least_squares(
         Non-negative weights summing to 1.
     """
     n_sources = X.shape[1]
+    if n_sources == 0:
+        return np.empty(0, dtype=float)
     if len(y) == 0:
         return np.full(n_sources, np.nan, dtype=float)
 

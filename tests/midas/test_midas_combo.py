@@ -515,7 +515,7 @@ def test_residuals_from_fits_df_exact_recovery():
 # ============================================================================
 
 
-def _combo_decomp_fixture(seed: int = 7):
+def _combo_decomp_fixture(seed: int = 7, outer_method: str = "average"):
     """Build a nested MidasCombo (outer over [inner_combo, x_q]) fitted on
     random data. Returns the fitted ``MidasCombo``."""
     rng = np.random.default_rng(seed)
@@ -568,7 +568,11 @@ def _combo_decomp_fixture(seed: int = 7):
     ols_xq = OLSSpec(variable="x_q", n_lags=1)
 
     inner = ComboSpec(name="inner", sources=[midas_pmi, midas_ip], method="average")
-    outer = ComboSpec(name="outer", sources=[inner, ols_xq], method="average")
+    outer = ComboSpec(
+        name="outer",
+        sources=[inner, ols_xq],
+        method=outer_method,
+    )
 
     mc = MidasCombo(combo_specs=outer, horizons=3)
     mc.fit(target, regressors)
@@ -600,6 +604,20 @@ class TestMidasComboForecastDecomp:
             )
             s = decomp.loc[decomp["horizon"] == h, "contribution"].sum()
             np.testing.assert_allclose(s, outer_oos, atol=1e-9)
+
+    def test_regression_decomposition_uses_oos_weights(self):
+        mc = _combo_decomp_fixture(outer_method="regression")
+        decomp = mc.forecast_decomp()
+
+        for h in range(mc.horizons):
+            outer_oos = float(
+                mc.forecasts_df_[
+                    (mc.forecasts_df_["spec"] == "outer")
+                    & (mc.forecasts_df_["horizon"] == h)
+                ]["value"].iloc[0]
+            )
+            contribution_sum = decomp.loc[decomp["horizon"] == h, "contribution"].sum()
+            np.testing.assert_allclose(contribution_sum, outer_oos, atol=1e-9)
 
     def test_components_reference_underlying_models(self):
         mc = _combo_decomp_fixture()
@@ -950,6 +968,33 @@ def test_filtered_sources_are_undefined_during_forecast():
     np.testing.assert_allclose(outer_value, x3_value)
     decomposition = model.forecast_decomp("outer")
     np.testing.assert_allclose(decomposition["contribution"].sum(), outer_value)
+
+
+@pytest.mark.parametrize("estimator", ["clipped_ols", "constrained_ls"])
+def test_filtered_regression_sources_are_undefined(estimator):
+    target, regressors, _ = sample_combo_data(
+        n_quarters=40,
+        n_lags=6,
+        noise=0.0,
+        seed=17,
+        monthly_vars=["x1"],
+        quarterly_vars=[],
+        outlier_date=None,
+    )
+    combo = ComboSpec(
+        name="combo",
+        sources=[MidasSpec("x1")],
+        method="regression",
+        estimator=estimator,
+        minimum_sample_size=100,
+    )
+
+    model = MidasCombo(combo_specs=combo, horizons=1).fit(target, regressors)
+    forecasts = model.forecast()
+    combo_forecast = forecasts.loc[forecasts["spec"] == "combo", "value"]
+
+    assert np.isnan(model.fitted_["combo"][0]).all()
+    assert combo_forecast.isna().all()
 
 
 def test_counterfactual_decomposition_uses_supplied_regressors():

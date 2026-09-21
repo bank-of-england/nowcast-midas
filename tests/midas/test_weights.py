@@ -213,6 +213,113 @@ class TestErrorBasedWeights:
 
         assert weights["perfect"][1] == weights["biased"][1] == 0.5
         assert weights["perfect"][2] == weights["biased"][2] == 0.5
+        assert weights["perfect"][3] > weights["biased"][3]
+
+    @pytest.mark.parametrize("method", ["mae", "mse", "rmse"])
+    def test_expanding_window_handles_source_without_prior_residuals(self, method):
+        target = pd.Series([1.0, 2.0, 3.0, 4.0])
+        source_fitted = pd.DataFrame(
+            {
+                "established": target,
+                "new": [np.nan, np.nan, 30.0, 40.0],
+            }
+        )
+
+        combined, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method=method,
+            window=None,
+        )
+
+        assert np.isfinite(combined[2])
+        np.testing.assert_allclose(
+            [weights["established"][2], weights["new"][2]],
+            [0.5, 0.5],
+        )
+
+    def test_finite_window_splits_weight_at_residual_count_boundary(self):
+        target = pd.Series(np.zeros(4))
+        source_fitted = pd.DataFrame(
+            {
+                "established": [1.0, 1.0, 1.0, 1.0],
+                "new": [np.nan, 0.0, 0.0, 0.0],
+            }
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=3,
+        )
+
+        np.testing.assert_allclose(
+            [weights["established"][3], weights["new"][3]],
+            [0.5, 0.5],
+        )
+        assert weights["new"][4] > weights["established"][4]
+
+    def test_expanding_oos_weights_include_final_residual(self):
+        target = pd.Series(np.zeros(3))
+        source_fitted = pd.DataFrame(
+            {
+                "recently_worse": [0.0, 0.0, 100.0],
+                "consistently_better": [1.0, 1.0, 0.0],
+            }
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=None,
+        )
+
+        assert weights["recently_worse"][2] > weights["consistently_better"][2]
+        assert weights["recently_worse"][3] < weights["consistently_better"][3]
+
+    def test_expanding_oos_weights_handle_history_removed_by_dummies(self):
+        index = pd.date_range("2020-03-31", periods=4, freq="QE")
+        target = pd.Series(np.arange(4, dtype=float), index=index)
+        source_fitted = pd.DataFrame(
+            {
+                "established": target,
+                "excluded": [np.nan, 10.0, np.nan, np.nan],
+            },
+            index=index,
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=None,
+            dummy_periods=[index[1]],
+        )
+
+        np.testing.assert_allclose(
+            [weights["established"][4], weights["excluded"][4]],
+            [0.5, 0.5],
+        )
+
+    @pytest.mark.parametrize("method", ["clipped_ols", "constrained_ls"])
+    def test_regression_returns_unavailable_when_all_sources_are_filtered(self, method):
+        target = pd.Series(np.arange(4, dtype=float))
+        source_fitted = _filter_sources(
+            pd.DataFrame({"short": [1.0, np.nan, np.nan, np.nan]}),
+            minimum_sample_size=4,
+        )
+
+        combined, weights = fit_regression_weights(
+            target,
+            source_fitted,
+            method=method,
+            minimum_sample_size=4,
+        )
+
+        assert np.isnan(combined).all()
+        assert weights == {}
 
     def test_regression_waits_for_minimum_common_sample(self):
         target = pd.Series([0.5, 1.0, 1.5, 2.0])
@@ -273,6 +380,10 @@ class TestConstrainedLeastSquares:
         w = constrained_least_squares(np.zeros((0, 2)), np.zeros(0))
         assert np.isnan(w).all()
 
+    def test_no_sources_returns_empty(self):
+        w = constrained_least_squares(np.zeros((3, 0)), np.ones(3))
+        assert w.size == 0
+
 
 class TestClippedOls:
     def test_weights_non_negative_and_sum_to_one(self):
@@ -286,6 +397,10 @@ class TestClippedOls:
     def test_empty_input_returns_nan(self):
         w = clipped_ols(np.zeros((0, 2)), np.zeros(0))
         assert np.isnan(w).all()
+
+    def test_no_sources_returns_empty(self):
+        w = clipped_ols(np.zeros((3, 0)), np.ones(3))
+        assert w.size == 0
 
 
 # ======================================================================
