@@ -121,7 +121,12 @@ Public API for `nowcast_midas`. Start with [`MidasCombo`](#nowcast_midas.midas_c
       show_source: false
       show_root_heading: true
 
-::: nowcast_midas.combo_weights.fit_weights
+::: nowcast_midas.combo_weights.fit_error_based_weights
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: nowcast_midas.combo_weights.fit_regression_weights
     options:
       show_source: false
       show_root_heading: true

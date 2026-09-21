@@ -9,7 +9,8 @@ from nowcast_midas.combo_weights import (
     clipped_ols,
     constrained_least_squares,
     fit_average,
-    fit_weights,
+    fit_error_based_weights,
+    fit_regression_weights,
 )
 from nowcast_midas.midas_combo import MidasCombo
 from nowcast_midas.specs import ComboSpec, MidasSpec
@@ -91,12 +92,12 @@ class TestFilterSources:
         assert spec.minimum_sample_size == 10
 
 
-class TestFitWeights:
+class TestErrorBasedWeights:
     def test_better_model_gets_higher_weight(self):
         target = pd.Series(np.arange(8, dtype=float))
         perfect = target.to_numpy().copy()
         biased = target.to_numpy() + 2.0
-        _, weights = fit_weights(
+        _, weights = fit_error_based_weights(
             target,
             pd.DataFrame({"perfect": perfect, "biased": biased}),
             method="rmse",
@@ -108,7 +109,7 @@ class TestFitWeights:
     @pytest.mark.parametrize("method", ["rmse", "mse", "mae"])
     def test_all_methods_produce_valid_output(self, method):
         target = pd.Series(np.arange(10, dtype=float))
-        combined, weights = fit_weights(
+        combined, weights = fit_error_based_weights(
             target,
             pd.DataFrame({"x": target + 0.1, "y": target - 0.2}),
             method=method,
@@ -120,15 +121,15 @@ class TestFitWeights:
 
     def test_weights_are_in_sample_only(self):
         target = pd.Series([1.0, 2.0])
-        _, weights = fit_weights(
+        _, weights = fit_error_based_weights(
             target,
             pd.DataFrame({"a": [1.1, 2.1], "b": [1.2, 2.2]}),
             method="rmse",
             window=4,
             discount_rate=1.0,
         )
-        assert len(weights["a"]) == len(target)
-        assert weights["a"][-1] > weights["b"][-1]
+        assert len(weights["a"]) == len(target) + 1
+        assert weights["a"][len(target) - 1] == weights["b"][len(target) - 1]
 
     def test_drops_residual_rows_with_any_missing_source(self):
         target = pd.Series([0.0, 1.0, 2.0, 3.0])
@@ -139,7 +140,7 @@ class TestFitWeights:
             }
         )
 
-        _, weights = fit_weights(
+        _, weights = fit_error_based_weights(
             target,
             source_fitted,
             method="mse",
@@ -147,8 +148,8 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        np.testing.assert_allclose(weights["a"][3], 4.0 / 9.0)
-        np.testing.assert_allclose(weights["b"][3], 5.0 / 9.0)
+        np.testing.assert_allclose(weights["a"][3], 0.5)
+        np.testing.assert_allclose(weights["b"][3], 0.5)
 
     def test_zeroes_and_renormalises_unavailable_current_sources(self):
         target = pd.Series([0.0, 1.0, 2.0])
@@ -159,7 +160,7 @@ class TestFitWeights:
             }
         )
 
-        combined, weights = fit_weights(
+        combined, weights = fit_error_based_weights(
             target,
             source_fitted,
             method="mse",
@@ -167,8 +168,8 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        assert weights["a"][-1] == 0.0
-        assert weights["b"][-1] == 1.0
+        assert weights["a"][2] == 0.0
+        assert weights["b"][2] == 1.0
         assert combined[-1] == 12.0
 
     def test_window_selects_latest_complete_rows(self):
@@ -176,11 +177,11 @@ class TestFitWeights:
         source_fitted = pd.DataFrame(
             {
                 "a": [1.0, 1.0, 1.0, np.nan, 1.0, 1.0],
-                "b": [1.0, 1.0, 1.0, 100.0, 10.0, 1.0],
+                "b": [1.0, 1.0, 1.0, 1.0, 2.0, 1.0],
             }
         )
 
-        _, weights = fit_weights(
+        _, weights = fit_error_based_weights(
             target,
             source_fitted,
             method="mse",
@@ -190,7 +191,7 @@ class TestFitWeights:
 
         np.testing.assert_allclose(
             [weights["a"][5], weights["b"][5]],
-            [34.0 / 35.0, 1.0 / 35.0],
+            [2 / 3, 1 / 3],
         )
 
     def test_finite_window_uses_available_rows_during_warmup(self):
@@ -202,7 +203,7 @@ class TestFitWeights:
             }
         )
 
-        _, weights = fit_weights(
+        _, weights = fit_error_based_weights(
             target,
             source_fitted,
             method="mse",
@@ -210,8 +211,115 @@ class TestFitWeights:
             discount_rate=1.0,
         )
 
-        assert weights["perfect"][1] > weights["biased"][1]
-        assert weights["perfect"][2] > weights["biased"][2]
+        assert weights["perfect"][1] == weights["biased"][1] == 0.5
+        assert weights["perfect"][2] == weights["biased"][2] == 0.5
+        assert weights["perfect"][3] > weights["biased"][3]
+
+    @pytest.mark.parametrize("method", ["mae", "mse", "rmse"])
+    def test_expanding_window_handles_source_without_prior_residuals(self, method):
+        target = pd.Series([1.0, 2.0, 3.0, 4.0])
+        source_fitted = pd.DataFrame(
+            {
+                "established": target,
+                "new": [np.nan, np.nan, 30.0, 40.0],
+            }
+        )
+
+        combined, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method=method,
+            window=None,
+        )
+
+        assert np.isfinite(combined[2])
+        np.testing.assert_allclose(
+            [weights["established"][2], weights["new"][2]],
+            [0.5, 0.5],
+        )
+
+    def test_finite_window_splits_weight_at_residual_count_boundary(self):
+        target = pd.Series(np.zeros(4))
+        source_fitted = pd.DataFrame(
+            {
+                "established": [1.0, 1.0, 1.0, 1.0],
+                "new": [np.nan, 0.0, 0.0, 0.0],
+            }
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=3,
+        )
+
+        np.testing.assert_allclose(
+            [weights["established"][3], weights["new"][3]],
+            [0.5, 0.5],
+        )
+        assert weights["new"][4] > weights["established"][4]
+
+    def test_expanding_oos_weights_include_final_residual(self):
+        target = pd.Series(np.zeros(3))
+        source_fitted = pd.DataFrame(
+            {
+                "recently_worse": [0.0, 0.0, 100.0],
+                "consistently_better": [1.0, 1.0, 0.0],
+            }
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=None,
+        )
+
+        assert weights["recently_worse"][2] > weights["consistently_better"][2]
+        assert weights["recently_worse"][3] < weights["consistently_better"][3]
+
+    def test_expanding_oos_weights_handle_history_removed_by_dummies(self):
+        index = pd.date_range("2020-03-31", periods=4, freq="QE")
+        target = pd.Series(np.arange(4, dtype=float), index=index)
+        source_fitted = pd.DataFrame(
+            {
+                "established": target,
+                "excluded": [np.nan, 10.0, np.nan, np.nan],
+            },
+            index=index,
+        )
+
+        _, weights = fit_error_based_weights(
+            target,
+            source_fitted,
+            method="mse",
+            window=None,
+            dummy_periods=[index[1]],
+        )
+
+        np.testing.assert_allclose(
+            [weights["established"][4], weights["excluded"][4]],
+            [0.5, 0.5],
+        )
+
+    @pytest.mark.parametrize("method", ["clipped_ols", "constrained_ls"])
+    def test_regression_returns_unavailable_when_all_sources_are_filtered(self, method):
+        target = pd.Series(np.arange(4, dtype=float))
+        source_fitted = _filter_sources(
+            pd.DataFrame({"short": [1.0, np.nan, np.nan, np.nan]}),
+            minimum_sample_size=4,
+        )
+
+        combined, weights = fit_regression_weights(
+            target,
+            source_fitted,
+            method=method,
+            minimum_sample_size=4,
+        )
+
+        assert np.isnan(combined).all()
+        assert weights == {}
 
     def test_regression_waits_for_minimum_common_sample(self):
         target = pd.Series([0.5, 1.0, 1.5, 2.0])
@@ -222,7 +330,7 @@ class TestFitWeights:
             }
         )
 
-        _, weights = fit_weights(
+        _, weights = fit_regression_weights(
             target,
             source_fitted,
             method="constrained_ls",
@@ -247,7 +355,7 @@ class TestFitWeightsRegression:
                 "b": target + rng.normal(0, 0.5, 20),
             }
         )
-        _, weights = fit_weights(
+        _, weights = fit_regression_weights(
             target,
             source_df,
             method="constrained_ls",
@@ -272,6 +380,10 @@ class TestConstrainedLeastSquares:
         w = constrained_least_squares(np.zeros((0, 2)), np.zeros(0))
         assert np.isnan(w).all()
 
+    def test_no_sources_returns_empty(self):
+        w = constrained_least_squares(np.zeros((3, 0)), np.ones(3))
+        assert w.size == 0
+
 
 class TestClippedOls:
     def test_weights_non_negative_and_sum_to_one(self):
@@ -285,6 +397,10 @@ class TestClippedOls:
     def test_empty_input_returns_nan(self):
         w = clipped_ols(np.zeros((0, 2)), np.zeros(0))
         assert np.isnan(w).all()
+
+    def test_no_sources_returns_empty(self):
+        w = clipped_ols(np.zeros((3, 0)), np.ones(3))
+        assert w.size == 0
 
 
 # ======================================================================

@@ -38,7 +38,8 @@ from ._compat import legacy_forecast_alias
 from .combo_weights import (
     _filter_sources,
     fit_average,
-    fit_weights,
+    fit_error_based_weights,
+    fit_regression_weights,
 )
 from .midas import MIDAS, FittedMidas
 from .multi_midas import FittedMultiMidas, MultiMIDAS
@@ -55,11 +56,11 @@ _VALID_COMBO_METHODS = ("average", "rmse", "mse", "mae", "regression")
 class MidasCombo(_ComboPlots):
     """MIDAS forecast combination pipeline.
 
-    Fits individual MIDAS / OLS regressions for the indicators
+    Fits individual MIDAS / OLS regressions for the leaf
     referenced by the combination tree and combines them according to
     the supplied hierarchy of `ComboSpec` nodes.
 
-    The pipeline derives MIDAS, OLS, and MultiMIDAS indicator specs from
+    The pipeline derives MIDAS, OLS, and MultiMIDAS leaf specs from
     ``combo_specs``. It registers each spec object that appears as a source
     and fits the resulting leaves before it fits the combination nodes.
 
@@ -90,7 +91,7 @@ class MidasCombo(_ComboPlots):
         horizons: int = 3,
     ) -> None:
         # Flatten the nested ComboSpec tree into dependency order and
-        # harvest any embedded indicator specs.
+        # harvest any embedded leaf specs.
         if combo_specs is not None:
             if not isinstance(combo_specs, ComboSpec):
                 raise TypeError(f"Expected ComboSpec, got {type(combo_specs)}")
@@ -334,7 +335,12 @@ class MidasCombo(_ComboPlots):
     def _resolve_leaf_horizons(
         self,
     ) -> tuple[dict[str, list[int]], dict[str, list[int | None]]]:
-        """Resolve fitted and forecast horizons for each indicator leaf."""
+        """Resolve ragged-edge horizons for each indicator leaf.
+
+        For each leaf, determine the direct model horizons needed for
+        the requested forecast steps, based on the latest finite regressor
+        release shared by that leaf's variables.
+        """
         last_target_period = self.target_.index[-1].to_period("Q")
         forecast_horizons: dict[str, list[int | None]] = {}
         model_horizons: dict[str, list[int]] = {}
@@ -412,7 +418,7 @@ class MidasCombo(_ComboPlots):
         forecast_date: pd.Timestamp,
         regressors: pd.DataFrame | None = None,
     ) -> dict[str, float]:
-        """Forecast every indicator at one common target date.
+        """Forecast every leaf at one common target date.
 
         Each leaf selects the direct forecast horizon implied by its own
         latest finite regressor release.  This allows leaves with different
@@ -483,13 +489,16 @@ class MidasCombo(_ComboPlots):
     ) -> dict[str, float]:
         """Combine indicator forecasts using the OOS weight row.
 
-        Weights are shifted to application-date rows in the weighting
-        routine, so OOS step ``s`` uses row ``T + s`` (contemporaneous
-        with the forecast target step). Falls back to the last finite
-        weight if that slot is NaN.
+        The weight-fitting functions append one extra weight row (index ``T``) per
+        horizon, estimated from the full in-sample history, for
+        out-of-sample use. Every application step/horizon reads that same
+        row; the row already varies by horizon because each horizon has
+        its own ``combo_weights_[name][h]`` array. Falls back to the last
+        finite in-sample weight if that slot is NaN (e.g. ``method='average'``,
+        whose weight arrays have no such extra row).
         """
         T = len(self.target_)
-        w_idx = T + step
+        w_idx = T
         out: dict[str, float] = {}
         # ``_combo_specs_flat`` is in dependency order (leaves first),
         # so a combo whose source is another combo can read that inner
@@ -550,7 +559,7 @@ class MidasCombo(_ComboPlots):
         Parameters
         ----------
         spec_name : str | None
-            Name of the combo (or leaf indicator model) to decompose.
+            Name of the combo (or leaf model) to decompose.
             Defaults to the root `ComboSpec` passed at construction.
         regressors : pd.DataFrame | None
             Long-format regressors to use for the decomposition. If None,
@@ -602,11 +611,9 @@ class MidasCombo(_ComboPlots):
             available = {**oos_vals, **combo_vals}
 
             if spec_name in combo_names:
-                eff_weights = self._effective_leaf_weights(
-                    spec_name, h, T + step, available
-                )
+                eff_weights = self._effective_leaf_weights(spec_name, h, T, available)
             else:
-                # A leaf indicator model decomposes with effective weight 1.
+                # A leaf model decomposes with effective weight 1.
                 eff_weights = {spec_name: 1.0}
 
             for model_name, w_eff in eff_weights.items():
@@ -696,9 +703,9 @@ class MidasCombo(_ComboPlots):
         w_idx: int,
         available: dict[str, float],
     ) -> dict[str, float]:
-        """Reduce a (possibly nested) combo to effective indicator weights.
+        """Reduce a (possibly nested) combo to effective leaf weights.
 
-        Returns a mapping ``{indicator_model_name: effective_weight}`` such
+        Returns a mapping ``{leaf_model_name: effective_weight}`` such
         that the combo forecast equals ``sum_model w_eff * model_forecast``.
         """
         spec = next(s for s in self._combo_specs_flat if s.name == combo_name)
@@ -712,10 +719,10 @@ class MidasCombo(_ComboPlots):
         )
         for src, w in weights.items():
             if src in combo_names:
-                for leaf, lw in self._effective_leaf_weights(
+                for leaf, leaf_weight in self._effective_leaf_weights(
                     src, h, w_idx, available
                 ).items():
-                    out[leaf] += w * lw
+                    out[leaf] += w * leaf_weight
             else:
                 out[src] += w
         return dict(out)
@@ -726,7 +733,7 @@ class MidasCombo(_ComboPlots):
         forecast_date: pd.Timestamp,
         regressors: pd.DataFrame | None = None,
     ) -> list[tuple[str, float, float]]:
-        """Return ``(component, contribution, weight)`` rows of a leaf model.
+        """Return ``(component, contribution, weight)`` rows of an leaf model.
 
         Parameters
         ----------
@@ -909,8 +916,6 @@ class MidasCombo(_ComboPlots):
                     and len(fits_h0["value"]) < spec.minimum_sample_size
                 ):
                     raise ValueError()
-                    # This follows the EViews implementation, but the check must
-                    # also cover other horizons.
 
                 # Collect model.fits_df_ with spec column for accumulation
                 midas_df = model.fits_df_.copy()
@@ -1103,29 +1108,25 @@ class MidasCombo(_ComboPlots):
         )
         source_df = _filter_sources(source_df, spec.minimum_sample_size)
 
-        target = self.target_.reindex(source_df.index)
-
         if spec.method == "average":
             combo, weights = fit_average(source_df)
         elif spec.method == "regression":
-            combo, weights = fit_weights(
-                target,
+            combo, weights = fit_regression_weights(
+                self.target_,
                 source_df,
                 method=spec.estimator,
                 window=spec.window,
-                discount_rate=spec.discount_rate,
                 dummy_periods=spec.dummy_periods,
                 minimum_sample_size=spec.minimum_sample_size,
             )
-        else:  # rmse / mse / mae
-            combo, weights = fit_weights(
-                target,
+        else:
+            combo, weights = fit_error_based_weights(
+                self.target_,
                 source_df,
                 method=spec.method,
                 window=spec.window,
                 discount_rate=spec.discount_rate,
                 dummy_periods=spec.dummy_periods,
-                minimum_sample_size=spec.minimum_sample_size,
             )
 
         combo_series = pd.Series(combo, index=source_df.index)
