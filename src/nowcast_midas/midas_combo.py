@@ -339,7 +339,8 @@ class MidasCombo(_ComboPlots):
 
         For each leaf, determine the direct model horizons needed for
         the requested forecast steps, based on the latest finite regressor
-        release shared by that leaf's variables.
+        release shared by that leaf's variables. Negative horizons allow
+        later indicator quarters to inform an earlier target quarter.
         """
         last_target_period = self.target_.index[-1].to_period("Q")
         forecast_horizons: dict[str, list[int | None]] = {}
@@ -353,14 +354,15 @@ class MidasCombo(_ComboPlots):
                     continue
                 target_period = last_target_period + step + 1
                 horizon = target_period.ordinal - latest_period.ordinal
-                required.append(horizon if horizon >= 0 else None)
+                required.append(horizon)
             forecast_horizons[name] = required
             finite = [horizon for horizon in required if horizon is not None]
             max_horizon = min(
                 max(finite, default=0),
                 max(len(self.target_) - 1, 0),
             )
-            model_horizons[name] = list(range(max_horizon + 1))
+            min_horizon = min(0, min(finite, default=0))
+            model_horizons[name] = list(range(min_horizon, max_horizon + 1))
 
         return model_horizons, forecast_horizons
 
@@ -394,7 +396,7 @@ class MidasCombo(_ComboPlots):
         horizon = (
             pd.Timestamp(forecast_date).to_period("Q").ordinal - latest_period.ordinal
         )
-        return horizon if horizon >= 0 else None
+        return horizon
 
     def _source_horizon(self, source: str, step: int) -> int | None:
         """Return the direct horizon for a source at an application step."""
@@ -1088,16 +1090,13 @@ class MidasCombo(_ComboPlots):
                     self.fitted_[spec.name][h] = np.full(T, np.nan)
                 continue
 
-            valid_indices = np.where(model.valid_mask_)[0]
             self.multi_midas_instances_[spec.name] = model
 
             for h, fit in model.fits_.items():
                 self.multi_midas_models_[spec.name][h] = fit
 
-                fitted = np.full(T, np.nan)
-                n_fit = len(fit.fitted_values)
-                target_indices = valid_indices[:n_fit] + h
-                fitted[target_indices] = fit.fitted_values
+                fitted = pd.Series(np.nan, index=self.target_.index)
+                fitted.loc[pd.DatetimeIndex(fit.dates)] = np.asarray(fit.fitted_values)
                 self.fitted_[spec.name][h] = fitted
 
     def _fit_combo(self, spec: ComboSpec, horizon: int) -> None:

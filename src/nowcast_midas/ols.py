@@ -11,6 +11,7 @@ from ._compat import legacy_forecast_alias
 from .utils import (
     _build_ar_lag_matrix,
     _build_dummy_matrix,
+    _build_horizon_lag_matrix,
     _build_quarterly_lag_matrix,
 )
 
@@ -79,7 +80,9 @@ class OLS:
     start_lag : int
         Index of the first lag to include (default 0).
     horizons : list[int] | None
-        Direct-forecast horizons (default ``[0]``).
+        Direct-forecast horizons (default ``[0]``). Negative horizons use
+        regressor windows after the target quarter. Dummies and, for
+        negative horizons, AR lags remain aligned to the target quarter.
     n_ar_lags : int
         Number of autoregressive lags of the dependent variable to include
         (default 0 = no AR terms).  When > 0, the model becomes
@@ -107,13 +110,11 @@ class OLS:
         if n_ar_lags < 0:
             raise ValueError("n_ar_lags must be >= 0")
 
-        if horizons is not None:
-            if not isinstance(horizons, list) or not all(
-                isinstance(h, int) for h in horizons
-            ):
-                raise ValueError("horizons must be a list of integers.")
-            if any(h < 0 for h in horizons):
-                raise ValueError("horizons must be non-negative integers.")
+        if horizons is not None and (
+            not isinstance(horizons, list)
+            or not all(isinstance(h, int) for h in horizons)
+        ):
+            raise ValueError("horizons must be a list of integers.")
 
         self.n_lags = n_lags
         self.start_lag = start_lag
@@ -199,7 +200,7 @@ class OLS:
         T = len(y)
         max_horizon = max(self.horizons)
         if any(
-            h >= T or not (valid[: T - h] & np.isfinite(y[h:])).any()
+            h >= T or (h >= 0 and not (valid[: T - h] & np.isfinite(y[h:])).any())
             for h in self.horizons
         ):
             raise ValueError(
@@ -213,12 +214,31 @@ class OLS:
         all_values = []
 
         for h in self.horizons:
-            origin_valid = valid[: T - h] & np.isfinite(y[h:])
-            X_h = X[: T - h][origin_valid]
-            y_h = y[h:][origin_valid]
-            D_h = D[h:][origin_valid] if D is not None else None
-            Y_ar_h = Y_ar[: T - h][origin_valid]
-            dates_h = target_dates_np[h:][origin_valid]
+            if h < 0:
+                X_origin = _build_horizon_lag_matrix(
+                    target_dates_np,
+                    regressors,
+                    self.n_lags,
+                    self.start_lag,
+                    h,
+                    quarterly=True,
+                )
+                origin_valid = np.isfinite(y) & np.all(np.isfinite(X_origin), axis=1)
+                origin_valid &= np.all(np.isfinite(Y_ar), axis=1)
+                X_h = X_origin[origin_valid]
+                y_h = y[origin_valid]
+                D_h = D[origin_valid] if D is not None else None
+                Y_ar_h = Y_ar[origin_valid]
+                dates_h = target_dates_np[origin_valid]
+            else:
+                origin_valid = valid[: T - h] & np.isfinite(y[h:])
+                X_h = X[: T - h][origin_valid]
+                y_h = y[h:][origin_valid]
+                D_h = D[h:][origin_valid] if D is not None else None
+                Y_ar_h = Y_ar[: T - h][origin_valid]
+                dates_h = target_dates_np[h:][origin_valid]
+            if not len(y_h):
+                raise ValueError(f"No valid observations for horizon {h}.")
             fit = self._fit_single_horizon(y_h, X_h, D_h, Y_ar_h)
             fit.dates = dates_h
             fit.fitted_values = pd.Series(

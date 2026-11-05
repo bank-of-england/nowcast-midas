@@ -191,6 +191,52 @@ def _build_lag_matrix(
     return X
 
 
+def _build_horizon_lag_matrix(
+    target_dates: np.ndarray,
+    regressors: pd.DataFrame,
+    n_lags: int,
+    start_lag: int,
+    horizon: int,
+    *,
+    quarterly: bool = False,
+) -> np.ndarray:
+    """Build target-aligned lag windows at the specified direct horizon.
+
+    Parameters
+    ----------
+    target_dates : np.ndarray
+        Quarterly target dates in chronological order.
+    regressors : pd.DataFrame
+        Single-indicator data with ``date`` and ``value`` columns.
+    n_lags : int
+        Number of indicator lags in each window.
+    start_lag : int
+        First indicator lag to include.
+    horizon : int
+        Target quarter minus regressor-origin quarter. Negative values
+        select windows in quarters after the target.
+    quarterly : bool
+        Whether to build quarterly rather than monthly lag windows.
+
+    Returns
+    -------
+    np.ndarray
+        Target-aligned lag matrix. Origins beyond the latest finite
+        indicator quarter are missing rather than reusing an older window.
+    """
+    origin_periods = pd.DatetimeIndex(target_dates).to_period("Q") - horizon
+    origin_dates = origin_periods.to_timestamp(how="end").normalize()
+    builder = _build_quarterly_lag_matrix if quarterly else _build_lag_matrix
+    matrix = builder(origin_dates, regressors, n_lags, start_lag)
+    finite_dates = regressors.loc[np.isfinite(regressors["value"]), "date"]
+    if finite_dates.empty:
+        matrix[:] = np.nan
+    else:
+        latest_period = pd.Timestamp(finite_dates.max()).to_period("Q")
+        matrix[origin_periods > latest_period] = np.nan
+    return matrix
+
+
 def _build_quarterly_lag_matrix(
     target_dates: pd.DatetimeIndex | pd.Series | np.ndarray | list | pd.Timestamp,
     regressors: pd.DataFrame,

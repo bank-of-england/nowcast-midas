@@ -11,7 +11,12 @@ from scipy.optimize import least_squares
 from ._compat import legacy_forecast_alias
 from .plots.midas import _MIDASPlots
 from .temporal_weights import _weight_jacobian, get_weights
-from .utils import _build_ar_lag_matrix, _build_dummy_matrix, _build_lag_matrix
+from .utils import (
+    _build_ar_lag_matrix,
+    _build_dummy_matrix,
+    _build_horizon_lag_matrix,
+    _build_lag_matrix,
+)
 
 __all__ = ["MIDAS", "FittedMidas"]
 
@@ -50,7 +55,10 @@ class MIDAS(_MIDASPlots):
         forecast steps.  The MIDAS model uses a direct forecasting approach,
         so each horizon is estimated as a separate model with the target
         variable shifted accordingly y[t+h] ~ X[t]  (direct h-step
-        forecasting).
+        forecasting). Negative horizons are supported: ``h=-1`` pairs
+        each target with the following quarter's indicator window, allowing
+        October data to estimate Q3. Dummies and, for negative horizons,
+        AR lags remain aligned to the target quarter.
     start_lag : int
         Index of the first high-frequency lag to include (default 0).
     n_ar_lags : int
@@ -97,13 +105,11 @@ class MIDAS(_MIDASPlots):
         elif estimator == "ols" and method not in _OLS_METHODS:
             raise ValueError(f"OLS only valid for {_OLS_METHODS}, not '{method}'.")
 
-        if horizons is not None:
-            if not isinstance(horizons, list) or not all(
-                isinstance(h, int) for h in horizons
-            ):
-                raise ValueError("horizons must be a list of integers.")
-            if any(h < 0 for h in horizons):
-                raise ValueError("horizons must be non-negative integers.")
+        if horizons is not None and (
+            not isinstance(horizons, list)
+            or not all(isinstance(h, int) for h in horizons)
+        ):
+            raise ValueError("horizons must be a list of integers.")
 
         self.horizons = horizons if horizons is not None else [0]
         self.estimator = estimator
@@ -205,14 +211,26 @@ class MIDAS(_MIDASPlots):
         all_values = []
 
         for h in self.horizons:
-            # Align direct forecasts so y_{t+h} uses regressors observed at t.
-            # Dummies align with y (target frequency), not X.
-            source_valid = valid[: T - h]
-            X_h = X[: T - h][source_valid]
-            y_h = y[h:][source_valid]
-            D_h = D[h:][source_valid] if D is not None else None
-            Y_ar_h = Y_ar[: T - h][source_valid]
-            dates_h = target_dates_np[h:][source_valid]
+            if h < 0:
+                X_origin = _build_horizon_lag_matrix(
+                    target_dates_np, regressors, self.n_lags, self.start_lag, h
+                )
+                source_valid = np.all(np.isfinite(X_origin), axis=1)
+                source_valid &= np.all(np.isfinite(Y_ar), axis=1)
+                X_h = X_origin[source_valid]
+                y_h = y[source_valid]
+                D_h = D[source_valid] if D is not None else None
+                Y_ar_h = Y_ar[source_valid]
+                dates_h = target_dates_np[source_valid]
+            else:
+                source_valid = valid[: T - h]
+                X_h = X[: T - h][source_valid]
+                y_h = y[h:][source_valid]
+                D_h = D[h:][source_valid] if D is not None else None
+                Y_ar_h = Y_ar[: T - h][source_valid]
+                dates_h = target_dates_np[h:][source_valid]
+            if not len(y_h):
+                raise ValueError(f"No valid observations for horizon {h}.")
             fit = self._fit_single_horizon(y_h, X_h, D_h, Y_ar_h)
             fit.dates = dates_h
             fit.fitted_values = pd.Series(

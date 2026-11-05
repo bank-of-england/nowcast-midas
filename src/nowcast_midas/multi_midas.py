@@ -17,6 +17,7 @@ from .temporal_weights import get_weights
 from .utils import (
     _build_ar_lag_matrix,
     _build_dummy_matrix,
+    _build_horizon_lag_matrix,
     _build_lag_matrix,
     _build_quarterly_lag_matrix,
 )
@@ -104,7 +105,9 @@ class MultiMIDAS:
         Shared estimator override.  ``None`` (default) chooses
         automatically per variable based on method.
     horizons : list[int] | None
-        Direct-forecast horizons (default ``[0]``).
+        Direct-forecast horizons (default ``[0]``). Negative horizons use
+        regressor windows after the target quarter. Dummies and, for
+        negative horizons, AR lags remain aligned to the target quarter.
     start_lag : int
         Shared starting lag index (default 0).
     n_ar_lags : int
@@ -200,13 +203,11 @@ class MultiMIDAS:
         # Use joint OLS when every monthly variable supports it.
         self._use_ols = all(spec.estimator == "ols" for spec in self.monthly_specs)
 
-        if horizons is not None:
-            if not isinstance(horizons, list) or not all(
-                isinstance(h, int) for h in horizons
-            ):
-                raise ValueError("horizons must be a list of integers.")
-            if any(h < 0 for h in horizons):
-                raise ValueError("horizons must be non-negative integers.")
+        if horizons is not None and (
+            not isinstance(horizons, list)
+            or not all(isinstance(h, int) for h in horizons)
+        ):
+            raise ValueError("horizons must be a list of integers.")
 
         self.horizons = horizons if horizons is not None else [0]
         self.n_ar_lags = n_ar_lags
@@ -307,7 +308,7 @@ class MultiMIDAS:
 
         max_horizon = max(self.horizons)
         if any(
-            h >= T or not (valid[: T - h] & np.isfinite(y[h:])).any()
+            h >= T or (h >= 0 and not (valid[: T - h] & np.isfinite(y[h:])).any())
             for h in self.horizons
         ):
             raise ValueError(
@@ -317,15 +318,44 @@ class MultiMIDAS:
 
         self.fits_ = {}
         for h in self.horizons:
-            # Pair origin X[t] with target y[t+h]. Apply the complete-case
-            # mask after shifting so the calendar alignment remains intact.
-            origin_valid = valid[: T - h] & np.isfinite(y[h:])
-            X_h = [X_k[: T - h][origin_valid] for X_k in X_list]
-            Z_h = [Z_k[: T - h][origin_valid] for Z_k in Z_list]
-            y_h = y[h:][origin_valid]
-            D_h = D[h:][origin_valid] if D is not None else None
-            Y_ar_h = Y_ar[: T - h][origin_valid]
-            dates_h = target_dates_np[h:][origin_valid]
+            if h < 0:
+                X_origin = []
+                Z_origin = []
+                for spec in self.specs:
+                    var_data = regressors.loc[
+                        regressors["variable"] == spec.variable, ["date", "value"]
+                    ]
+                    block = _build_horizon_lag_matrix(
+                        target_dates_np,
+                        var_data,
+                        spec.n_lags,
+                        spec.start_lag,
+                        h,
+                        quarterly=spec.frequency == "QE",
+                    )
+                    if spec.frequency == "QE":
+                        Z_origin.append(block)
+                    else:
+                        X_origin.append(block)
+                origin_valid = np.isfinite(y) & np.all(np.isfinite(Y_ar), axis=1)
+                for block in X_origin + Z_origin:
+                    origin_valid &= np.all(np.isfinite(block), axis=1)
+                X_h = [block[origin_valid] for block in X_origin]
+                Z_h = [block[origin_valid] for block in Z_origin]
+                y_h = y[origin_valid]
+                D_h = D[origin_valid] if D is not None else None
+                Y_ar_h = Y_ar[origin_valid]
+                dates_h = target_dates_np[origin_valid]
+            else:
+                origin_valid = valid[: T - h] & np.isfinite(y[h:])
+                X_h = [X_k[: T - h][origin_valid] for X_k in X_list]
+                Z_h = [Z_k[: T - h][origin_valid] for Z_k in Z_list]
+                y_h = y[h:][origin_valid]
+                D_h = D[h:][origin_valid] if D is not None else None
+                Y_ar_h = Y_ar[: T - h][origin_valid]
+                dates_h = target_dates_np[h:][origin_valid]
+            if not len(y_h):
+                raise ValueError(f"No valid observations for horizon {h}.")
             fit = self._fit_single_horizon(y_h, X_h, Z_h, D_h, Y_ar_h)
             fit.dates = dates_h
             self.fits_[h] = fit

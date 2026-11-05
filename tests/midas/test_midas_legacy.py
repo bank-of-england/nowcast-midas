@@ -203,6 +203,7 @@ class TestMIDASForecast:
     def test_plot_forecast(self):
         """plot_forecast requires forecast() to have been called."""
         y, X = _simulate(TRUE_W)
+        y, X = y[:40], X[:40]
         m = MIDAS(method="almon", n_lags=K)
         fit = m._fit_single_horizon(y, X)
         dates = pd.date_range("2018-03-31", periods=fit.nobs, freq="QE").values
@@ -211,7 +212,11 @@ class TestMIDASForecast:
         m.fits_[0] = fit
         # Manually set a forecasts_df_ so plot_forecast works
         m.forecasts_df_ = pd.DataFrame(
-            {"horizon": [0], "date": [pd.Timestamp("2020-01-01")], "value": [1.0]}
+            {
+                "horizon": [0],
+                "date": [pd.Timestamp(dates[-1]) + pd.offsets.QuarterEnd(1)],
+                "value": [1.0],
+            }
         )
         fig, ax = m.plot_forecast(horizon=0)
         assert fig is not None

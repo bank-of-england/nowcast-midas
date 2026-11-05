@@ -122,14 +122,29 @@ model.fit(target, regressors)
 ```
 
 For each $h$ in `horizons`, `fit()` independently estimates a model on
-the pair $(y[h:],\, X[:T-h])$ — i.e. the direct $h$-step alignment
-$y_{t+h} \sim X_t$. Each fit is stored in `model.fits_`:
+the direct alignment $y_{t+h} \sim X_t$. For non-negative horizons this
+uses the pair $(y[h:],\, X[:T-h])$. Negative horizons instead build a
+regressor window at the origin quarter `target quarter - h` for each
+target date. Each fit is stored in `model.fits_`:
 
 ```python
 model.fits_[0]  # 1qa model: y[t]   ~ X[t]
 model.fits_[1]  # 2qa model: y[t+1] ~ X[t]
 model.fits_[4]  # 5qa model: y[t+4] ~ X[t]
 ```
+
+Negative horizons can be requested explicitly, for example
+`MIDAS(horizons=[-1, 0, 1])`. With October as the latest finite monthly
+observation, `h=-1` estimates Q3 using October's lag window. Historical Q3
+targets likewise use October windows; historical Q2 targets use July
+windows. Available windows beyond the end of the target sample can be used
+for estimation, while unavailable future windows are excluded. Dummies
+and negative-horizon AR terms align with the target, so AR predictors never
+include that target itself during estimation.
+
+The forecast date is the latest finite indicator quarter plus `h`.
+An October-informed Q3 estimate therefore retains a Q3 output date.
+Backtests must respect the October information date.
 
 Each entry is a `FittedMidas` dataclass with:
 

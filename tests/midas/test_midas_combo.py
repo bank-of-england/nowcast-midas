@@ -22,7 +22,13 @@ from nowcast_midas.midas import MIDAS
 from nowcast_midas.midas_combo import MidasCombo
 from nowcast_midas.multi_midas import MultiMIDAS
 from nowcast_midas.ols import OLS
-from nowcast_midas.specs import ComboSpec, MidasSpec, MultiMidasSpec, OLSSpec
+from nowcast_midas.specs import (
+    ComboSpec,
+    MidasSpec,
+    MultiMidasSpec,
+    OLSSpec,
+    VariableSpec,
+)
 from nowcast_midas.utils import sample_combo_data
 from tests.midas.sample_midas import sample_midas
 from tests.midas.sample_midas_combo import sample_midas_combo, sample_mixed_model_combo
@@ -654,7 +660,300 @@ class TestMidasComboForecastDecomp:
             np.testing.assert_allclose(s, xq_oos, atol=1e-9)
 
 
-def _combo_vintage_model(method="average"):
+def test_latest_regressor_in_following_quarter_is_used():
+    monthly_dates = pd.date_range("2010-01-31", "2023-10-31", freq="ME")
+    monthly_values = np.random.default_rng(42).normal(size=len(monthly_dates))
+    target_dates = pd.date_range("2010-03-31", "2023-06-30", freq="QE")
+    next_months = target_dates + pd.offsets.MonthEnd(1)
+    target = pd.DataFrame(
+        {
+            "date": target_dates,
+            "variable": "y",
+            "frequency": "QE",
+            "value": 2 + 3 * monthly_values[monthly_dates.get_indexer(next_months)],
+        }
+    )
+    regressors = pd.DataFrame(
+        {
+            "date": monthly_dates,
+            "variable": "indicator",
+            "frequency": "ME",
+            "value": monthly_values,
+        }
+    )
+    spec = MidasSpec("indicator", method="unrestricted", n_lags=1)
+    regressors = pd.concat(
+        [
+            regressors,
+            pd.DataFrame(
+                {
+                    "date": pd.date_range("2023-11-30", periods=2, freq="ME"),
+                    "variable": "indicator",
+                    "frequency": "ME",
+                    "value": np.nan,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    model = MidasCombo(
+        combo_specs=ComboSpec(name="combo", sources=[spec], method="average"),
+        horizons=1,
+    ).fit(target, regressors)
+
+    forecasts = model.forecast()
+
+    assert (forecasts["date"] == pd.Timestamp("2023-09-30")).all()
+    np.testing.assert_allclose(
+        forecasts["value"], 2 + 3 * monthly_values[-1], atol=1e-9
+    )
+    decomp = model.forecast_decomp("combo")
+    np.testing.assert_allclose(
+        decomp["contribution"].sum(), 2 + 3 * monthly_values[-1], atol=1e-9
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "month_within_quarter"),
+    [(kind, month) for kind in ("midas", "multi") for month in (1, 2, 3)]
+    + [("ols", 3)],
+)
+@pytest.mark.parametrize("horizon", [-1, -2])
+@pytest.mark.parametrize("n_ar_lags", [0, 1])
+@pytest.mark.parametrize("start_lag", [0, 1])
+def test_negative_horizons_recover_independent_truth(
+    kind, month_within_quarter, horizon, n_ar_lags, start_lag
+):
+    target_dates = pd.date_range("2010-03-31", periods=56, freq="QE")
+    origin_dates = target_dates + pd.offsets.QuarterEnd(-horizon)
+    frequency = "QE" if kind == "ols" else "ME"
+    regressor_dates = pd.date_range("2009-01-31", origin_dates[-1], freq=frequency)
+    values = np.random.default_rng(42).normal(size=len(regressor_dates))
+    anchor_dates = origin_dates
+    if kind != "ols":
+        anchor_dates = origin_dates - pd.offsets.MonthEnd(3 - month_within_quarter)
+        regressor_dates = regressor_dates[regressor_dates <= anchor_dates[-1]]
+        values = values[: len(regressor_dates)]
+    positions = regressor_dates.get_indexer(anchor_dates) - start_lag
+    predictor = 3 * values[positions] - 0.7 * values[positions - 1]
+    dummy_date = target_dates[20]
+    target_values = np.empty(len(target_dates))
+    for index, date in enumerate(target_dates):
+        previous = target_values[index - 1] if index else 0.0
+        target_values[index] = (
+            2 + predictor[index] + 0.4 * n_ar_lags * previous + 5 * (date == dummy_date)
+        )
+    target = pd.DataFrame(
+        {
+            "date": target_dates[:-1],
+            "variable": "y",
+            "frequency": "QE",
+            "value": target_values[:-1],
+        }
+    )
+    regressors = pd.DataFrame(
+        {
+            "date": regressor_dates,
+            "variable": "indicator",
+            "frequency": frequency,
+            "value": values,
+        }
+    )
+    settings = {
+        "n_lags": 2,
+        "start_lag": start_lag,
+        "n_ar_lags": n_ar_lags,
+        "dummy_periods": [dummy_date],
+    }
+    if kind == "midas":
+        spec = MidasSpec("indicator", method="unrestricted", **settings)
+        estimator = MIDAS(method="unrestricted", horizons=[horizon], **settings)
+    elif kind == "multi":
+        spec = MultiMidasSpec(
+            "joint", variables=["indicator"], method="unrestricted", **settings
+        )
+        estimator = MultiMIDAS(
+            variables=["indicator"],
+            method="unrestricted",
+            horizons=[horizon],
+            **settings,
+        )
+    else:
+        spec = OLSSpec("indicator", **settings)
+        estimator = OLS(horizons=[horizon], **settings)
+
+    estimator.fit(target, regressors)
+    fit = estimator.fits_[horizon]
+    np.testing.assert_array_equal(fit.dates, target_dates[n_ar_lags:-1].to_numpy())
+    np.testing.assert_allclose(
+        fit.fitted_values, target_values[n_ar_lags:-1], atol=1e-9
+    )
+    np.testing.assert_allclose(fit.gamma, [5], atol=1e-9)
+    if n_ar_lags:
+        np.testing.assert_allclose(fit.phi, [0.4], atol=1e-9)
+    forecast = estimator.forecast(regressors)
+    assert forecast["date"].iloc[0] == target_dates[-1]
+    np.testing.assert_allclose(forecast["value"], target_values[-1], atol=1e-9)
+    decomp = estimator.forecast_decomp(regressors)
+    np.testing.assert_allclose(
+        decomp["contribution"].sum(), target_values[-1], atol=1e-9
+    )
+
+    model = MidasCombo(
+        combo_specs=ComboSpec(name="combo", sources=[spec], method="average"),
+        horizons=1,
+    ).fit(target, regressors)
+    assert model.leaf_forecast_horizons_[
+        spec.name if kind == "multi" else "indicator"
+    ] == [horizon]
+    np.testing.assert_allclose(model.forecast()["value"], target_values[-1], atol=1e-9)
+    np.testing.assert_allclose(
+        model.forecast_decomp()["contribution"].sum(), target_values[-1], atol=1e-9
+    )
+
+    revised = regressors.copy()
+    revised.loc[revised.index[-1 - start_lag], "value"] += 1
+    revised_forecast = estimator.forecast(revised)
+    np.testing.assert_allclose(
+        revised_forecast["value"], target_values[-1] + 3, atol=1e-9
+    )
+
+
+@pytest.mark.parametrize("kind", ["midas", "multi", "ols"])
+def test_negative_horizon_excludes_unavailable_future_windows(kind):
+    dates = pd.date_range("2010-03-31", periods=30, freq="QE")
+    target = pd.DataFrame({"date": dates, "value": np.arange(len(dates), dtype=float)})
+    regressors = pd.DataFrame(
+        {"date": dates[:-2], "variable": "x", "value": np.arange(len(dates) - 2)}
+    )
+    if kind == "midas":
+        estimator = MIDAS(method="unrestricted", n_lags=1, horizons=[-1])
+    elif kind == "multi":
+        estimator = MultiMIDAS(
+            variables=["x"], method="unrestricted", n_lags=1, horizons=[-1]
+        )
+    else:
+        estimator = OLS(n_lags=1, horizons=[-1])
+
+    estimator.fit(target, regressors)
+
+    np.testing.assert_array_equal(estimator.fits_[-1].dates, dates[:-3].to_numpy())
+    np.testing.assert_allclose(
+        estimator.fits_[-1].fitted_values, target["value"][:-3], atol=1e-12
+    )
+    with pytest.raises(ValueError, match="No valid observations"):
+        estimator.fit(target.iloc[:2], regressors.iloc[:1])
+
+
+def test_leading_and_lagging_indicators_share_forecast_dates():
+    sample = sample_midas_combo()
+    regressors = sample.regressors.copy()
+    fast = regressors["variable"] == "fast"
+    regressors.loc[fast, "date"] = (
+        regressors.loc[fast, "date"] + pd.DateOffset(months=3) + pd.offsets.MonthEnd(0)
+    )
+    specs = [
+        MidasSpec(variable=name, method="unrestricted", n_lags=3)
+        for name in sample.leaves
+    ]
+    model = MidasCombo(
+        combo_specs=ComboSpec(name="combo", sources=specs, method="average"),
+        horizons=3,
+    ).fit(sample.target_train, regressors)
+
+    forecasts = model.forecast()
+
+    assert model.leaf_forecast_horizons_["fast"] == [-1, 0, 1]
+    assert model.leaf_forecast_horizons_["slow"] == [1, 2, 3]
+    first = forecasts.loc[forecasts["horizon"] == 0].set_index("spec")["value"]
+    for name, truth in sample.leaves.items():
+        np.testing.assert_allclose(first[name], truth.forecast, atol=2e-5)
+    np.testing.assert_allclose(
+        first["combo"],
+        np.mean([truth.forecast for truth in sample.leaves.values()]),
+        atol=2e-5,
+    )
+    assert np.isfinite(forecasts["value"]).all()
+    decomp = model.forecast_decomp()
+    for step in range(3):
+        expected = forecasts.loc[
+            (forecasts["spec"] == "combo") & (forecasts["horizon"] == step), "value"
+        ].iloc[0]
+        np.testing.assert_allclose(
+            decomp.loc[decomp["horizon"] == step, "contribution"].sum(),
+            expected,
+            atol=2e-5,
+        )
+
+
+def test_negative_horizon_joint_monthly_and_quarterly_regressors():
+    target_dates = pd.date_range("2010-03-31", periods=55, freq="QE")
+    origin_dates = target_dates + pd.offsets.QuarterEnd(1)
+    anchor_dates = origin_dates - pd.offsets.MonthEnd(2)
+    monthly_dates = pd.date_range("2009-01-31", anchor_dates[-1], freq="ME")
+    rng = np.random.default_rng(42)
+    monthly_values = rng.normal(size=len(monthly_dates))
+    quarterly_values = rng.normal(size=len(origin_dates))
+    truth = (
+        1
+        + 2 * monthly_values[monthly_dates.get_indexer(anchor_dates)]
+        - 0.5 * quarterly_values
+    )
+    target = pd.DataFrame(
+        {
+            "date": target_dates[:-1],
+            "variable": "y",
+            "frequency": "QE",
+            "value": truth[:-1],
+        }
+    )
+    regressors = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "date": monthly_dates,
+                    "variable": "monthly",
+                    "frequency": "ME",
+                    "value": monthly_values,
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "date": origin_dates,
+                    "variable": "quarterly",
+                    "frequency": "QE",
+                    "value": quarterly_values,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    variables = [
+        VariableSpec("quarterly", frequency="QE", n_lags=1),
+        VariableSpec("monthly", method="unrestricted", n_lags=1),
+    ]
+    estimator = MultiMIDAS(variables=variables, horizons=[-1]).fit(target, regressors)
+
+    np.testing.assert_allclose(estimator.fits_[-1].fitted_values, truth[:-1], atol=1e-9)
+    np.testing.assert_allclose(
+        estimator.forecast(regressors)["value"], truth[-1], atol=1e-9
+    )
+    np.testing.assert_allclose(
+        estimator.forecast_decomp(regressors)["contribution"].sum(),
+        truth[-1],
+        atol=1e-9,
+    )
+    spec = MultiMidasSpec("joint", variables=variables)
+    model = MidasCombo(
+        combo_specs=ComboSpec(name="combo", sources=[spec], method="average"),
+        horizons=1,
+    ).fit(target, regressors)
+    forecasts = model.forecast()
+    assert (forecasts["date"] == target_dates[-1]).all()
+    np.testing.assert_allclose(forecasts["value"], truth[-1], atol=1e-9)
+
+
+def _combo_vintage_model(method: str = "average"):
     sample = sample_midas_combo()
     specs = [
         MidasSpec(variable=name, method="unrestricted", n_lags=3)

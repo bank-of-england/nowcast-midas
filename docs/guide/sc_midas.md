@@ -147,9 +147,26 @@ model = MidasCombo(
 model.fit(target=target, regressors=regressors)
 ```
 
-`horizons` is a **count**, not an index. `horizons=3` fits a separate
-model for $h \in \{0,1,2\}$ — i.e. the 1qa, 2qa, 3qa direct
-forecasts.
+`horizons` is a **count**, not an index. `horizons=3` requests the
+first three quarters after the last observed target, reported with
+application horizons `0`, `1`, and `2`.
+
+Each indicator uses the internal direct horizon needed to reach that
+common target quarter from its latest finite observation. For a Q3
+estimate, an indicator ending in June uses `h=1`, one ending in September
+uses `h=0`, and one ending in October uses `h=-1`. No special option is
+needed: October data is used rather than discarded or returned as NaN
+solely because it belongs to Q4.
+
+Negative horizons use the same alignment throughout historical estimation.
+For example, with three monthly lags and October as the latest observation,
+Q3 is paired with October, September, and August in each historical year.
+Incomplete windows are excluded. Target dummies and negative-horizon AR
+terms stay attached to the target quarter, avoiding use of the target as
+its own predictor. OLS and MultiMIDAS leaves support negative horizons too.
+
+This is a Q3 estimate using October information, not a forecast made in
+September. Historical backtests must use the data available at each vintage.
 
 Internally `fit()` runs three stages:
 
