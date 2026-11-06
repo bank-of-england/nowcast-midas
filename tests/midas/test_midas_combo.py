@@ -496,10 +496,11 @@ def test_residuals_from_fits_df_exact_recovery():
             residuals_from_fits_df = obs_vals - fitted_vals
 
             # Get residuals from fit object
-            if var in mc.midas_models_ and h in mc.midas_models_[var]:
-                fit = mc.midas_models_[var][h]
-            elif var in mc.ols_models_ and h in mc.ols_models_[var]:
-                fit = mc.ols_models_[var][h]
+            direct_horizon = mc.leaf_forecast_horizons_[var][h]
+            if var in mc.midas_models_ and direct_horizon in mc.midas_models_[var]:
+                fit = mc.midas_models_[var][direct_horizon]
+            elif var in mc.ols_models_ and direct_horizon in mc.ols_models_[var]:
+                fit = mc.ols_models_[var][direct_horizon]
             else:
                 continue
 
@@ -865,6 +866,20 @@ def test_leading_and_lagging_indicators_share_forecast_dates():
 
     assert model.leaf_forecast_horizons_["fast"] == [-1, 0, 1]
     assert model.leaf_forecast_horizons_["slow"] == [1, 2, 3]
+    assert set(model.fits_df_["horizon"]) == {0, 1, 2}
+    for name, direct_horizons in model.leaf_forecast_horizons_.items():
+        for step, direct_horizon in enumerate(direct_horizons):
+            public = model.fits_df_.loc[
+                (model.fits_df_["spec"] == name) & (model.fits_df_["horizon"] == step),
+                ["date", "value"],
+            ]
+            direct = model.midas_instances_[name].fits_df_.loc[
+                model.midas_instances_[name].fits_df_["horizon"] == direct_horizon,
+                ["date", "value"],
+            ]
+            pd.testing.assert_frame_equal(
+                public.reset_index(drop=True), direct.reset_index(drop=True)
+            )
     first = forecasts.loc[forecasts["horizon"] == 0].set_index("spec")["value"]
     for name, truth in sample.leaves.items():
         np.testing.assert_allclose(first[name], truth.forecast, atol=2e-5)
@@ -951,6 +966,76 @@ def test_negative_horizon_joint_monthly_and_quarterly_regressors():
     forecasts = model.forecast()
     assert (forecasts["date"] == target_dates[-1]).all()
     np.testing.assert_allclose(forecasts["value"], truth[-1], atol=1e-9)
+
+
+@pytest.mark.parametrize("kind", ["midas", "multi"])
+def test_mixed_release_dates_use_common_public_horizons(kind):
+    monthly_dates = pd.date_range("2009-01-31", "2026-10-31", freq="ME")
+    values = np.random.default_rng(42).normal(size=len(monthly_dates))
+    target_dates = pd.date_range("2010-03-31", "2026-09-30", freq="QE")
+    positions = monthly_dates.get_indexer(target_dates + pd.offsets.MonthEnd(1))
+    truth = (
+        2
+        + 3 * values[positions]
+        - 0.7 * values[positions - 1]
+        + 0.2 * values[positions - 2]
+    )
+    target = pd.DataFrame(
+        {
+            "date": target_dates[:-1],
+            "variable": "y",
+            "frequency": "QE",
+            "value": truth[:-1],
+        }
+    )
+    fast = pd.DataFrame(
+        {
+            "date": monthly_dates,
+            "variable": "ihs",
+            "frequency": "ME",
+            "value": values,
+        }
+    )
+    other = fast.copy()
+    other["variable"] = "other"
+    other["date"] -= pd.offsets.MonthEnd(3)
+    regressors = pd.concat([fast, other], ignore_index=True)
+    if kind == "midas":
+        fast_spec = MidasSpec("ihs", method="unrestricted", n_lags=3)
+    else:
+        fast_spec = MultiMidasSpec(
+            "ihs", variables=["ihs"], method="unrestricted", n_lags=3
+        )
+    model = MidasCombo(
+        ComboSpec(
+            "combo",
+            [fast_spec, MidasSpec("other", method="unrestricted", n_lags=3)],
+            method="average",
+        ),
+        horizons=2,
+    ).fit(target, regressors)
+    forecasts = model.forecast()
+
+    assert model.leaf_forecast_horizons_ == {"ihs": [-1, 0], "other": [0, 1]}
+    for name in ("ihs", "other", "combo"):
+        fitted = model.fits_df_.loc[model.fits_df_["spec"] == name]
+        assert set(fitted["horizon"]) == {0, 1}
+        nowcast_fit = fitted.loc[fitted["horizon"] == 0]
+        np.testing.assert_array_equal(nowcast_fit["date"], target_dates[:-1])
+        np.testing.assert_allclose(nowcast_fit["value"], truth[:-1], atol=1e-9)
+    assert not model.fits_df_.duplicated(["spec", "horizon", "date"]).any()
+    assert set(model.fits_and_forecasts_df_["horizon"]) == {0, 1}
+    np.testing.assert_allclose(
+        forecasts.loc[forecasts["horizon"] == 0, "value"], truth[-1], atol=1e-9
+    )
+    decomposition = model.forecast_decomp()
+    for step, date in enumerate(("2026-09-30", "2026-12-31")):
+        rows = forecasts.loc[forecasts["horizon"] == step]
+        assert (rows["date"] == pd.Timestamp(date)).all()
+        components = decomposition.loc[decomposition["horizon"] == step]
+        assert (components["date"] == pd.Timestamp(date)).all()
+        expected = rows.loc[rows["spec"] == "combo", "value"].iloc[0]
+        np.testing.assert_allclose(components["contribution"].sum(), expected)
 
 
 def _combo_vintage_model(method: str = "average"):
@@ -1046,6 +1131,24 @@ def test_mixed_estimators_recover_each_nowcast_vintage(vintage_index):
     assert model.leaf_forecast_horizons_ == {
         name: [horizon] for name, horizon in vintage.horizons.items()
     }
+    assert set(model.fits_df_["spec"]) == {"midas", "multi", "quarterly", "average"}
+    assert set(model.fits_df_["horizon"]) == {0}
+    for instances in (
+        model.midas_instances_,
+        model.multi_midas_instances_,
+        model.ols_instances_,
+    ):
+        for name, instance in instances.items():
+            public = model.fits_df_.loc[
+                model.fits_df_["spec"] == name, ["date", "value"]
+            ]
+            direct = instance.fits_df_.loc[
+                instance.fits_df_["horizon"] == vintage.horizons[name],
+                ["date", "value"],
+            ]
+            pd.testing.assert_frame_equal(
+                public.reset_index(drop=True), direct.reset_index(drop=True)
+            )
     target = vintage.target_train[["date", "value"]]
 
     midas_regressors = vintage.regressors.loc[

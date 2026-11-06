@@ -193,6 +193,15 @@ Internally `fit()` runs three stages:
 | `fits_df_`              | `DataFrame` — `spec, date, horizon, value` | long-format in-sample fitted values       |
 | `weights_df_`           | `DataFrame` — `spec, source, horizon, value` | long-format combination weights         |
 
+`fits_df_` uses the same application horizons as `forecasts_df_`: `0` is
+the fitted history for the first requested forecast, `1` for the second,
+and so on. Only requested steps are included, for all leaf estimator types
+and combinations. Internal leaf fit objects and `fitted_` retain their
+direct horizon keys. Use `leaf_forecast_horizons_[name][step]` to find the
+internal leaf horizon corresponding to a public step. For example, an
+October indicator's internal horizons `-1` and `0` are displayed as `0`
+and `1` when forecasting Q3 and Q4. Dates and fitted values are unchanged.
+
 ```python
 model.summary(horizon=0)  # prints and returns the text
 ```
@@ -219,7 +228,8 @@ forecasts = model.forecast()
 * `date` — forecast target date. `horizon=0` → $y_{T+1}$,
   `horizon=1` → $y_{T+2}$, etc.
 * `spec` — indicator or combo name.
-* Step $s$ uses the horizon-$s$ model. This alignment needs no future
+* Step $s$ selects each leaf's direct horizon using
+    `leaf_forecast_horizons_[name][s]`. This alignment needs no future
     regressor values, so the pipeline fills every step by construction. A
     spec still returns `NaN` when its inputs are missing at the ragged edge.
 

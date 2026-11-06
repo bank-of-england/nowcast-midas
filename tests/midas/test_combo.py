@@ -487,10 +487,11 @@ def test_residuals_from_fits_df_exact_recovery():
             residuals_from_fits_df = obs_vals - fitted_vals
 
             # Get residuals from fit object
-            if var in mc.midas_models_ and h in mc.midas_models_[var]:
-                fit = mc.midas_models_[var][h]
-            elif var in mc.ols_models_ and h in mc.ols_models_[var]:
-                fit = mc.ols_models_[var][h]
+            direct_horizon = mc.leaf_forecast_horizons_[var][h]
+            if var in mc.midas_models_ and direct_horizon in mc.midas_models_[var]:
+                fit = mc.midas_models_[var][direct_horizon]
+            elif var in mc.ols_models_ and direct_horizon in mc.ols_models_[var]:
+                fit = mc.ols_models_[var][direct_horizon]
             else:
                 continue
 

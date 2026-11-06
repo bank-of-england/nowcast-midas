@@ -241,6 +241,29 @@ class MidasCombo(_ComboPlots):
             for spec in self._combo_specs_flat:
                 self._fit_combo(spec, horizon=h)
 
+        combo_names = {spec.name for spec in self._combo_specs_flat}
+        public_frames = [
+            self.fits_df_.loc[self.fits_df_["spec"].isin(combo_names)].copy()
+        ]
+        for instances in (
+            self.midas_instances_,
+            self.ols_instances_,
+            self.multi_midas_instances_,
+        ):
+            for name, model in instances.items():
+                for step, direct_horizon in enumerate(
+                    self.leaf_forecast_horizons_[name]
+                ):
+                    if direct_horizon is None:
+                        continue
+                    frame = model.fits_df_.loc[
+                        model.fits_df_["horizon"] == direct_horizon
+                    ].copy()
+                    frame["spec"] = name
+                    frame["horizon"] = step
+                    public_frames.append(frame)
+        self.fits_df_ = pd.concat(public_frames, ignore_index=True)
+
         return self
 
     @legacy_forecast_alias
@@ -280,7 +303,7 @@ class MidasCombo(_ComboPlots):
         rows: list[dict] = []
         for step in range(self.horizons):
             h = step
-            forecast_date = last_target + pd.DateOffset(months=3 * (step + 1))
+            forecast_date = last_target + pd.offsets.QuarterEnd(step + 1)
             oos_vals = self._forecast_models(forecast_date)
             combo_vals = self._forecast_combos(step=step, h=h, oos_vals=oos_vals)
             rows.append(
@@ -307,7 +330,7 @@ class MidasCombo(_ComboPlots):
 
         # Add date (step=0 → y[T+1], step=1 → y[T+2], etc.)
         forecasts_df_["date"] = last_target + forecasts_df_["step"].apply(
-            lambda r: pd.DateOffset(months=3 * (r + 1))
+            lambda step: pd.offsets.QuarterEnd(step + 1)
         )
 
         # Rename step to horizon and use the canonical column order.
@@ -607,7 +630,7 @@ class MidasCombo(_ComboPlots):
         rows: list[dict] = []
         for step in range(self.horizons):
             h = step
-            forecast_date = last_target + pd.DateOffset(months=3 * (h + 1))
+            forecast_date = last_target + pd.offsets.QuarterEnd(h + 1)
             oos_vals = self._forecast_models(forecast_date, regressors=regressors)
             combo_vals = self._forecast_combos(step=step, h=h, oos_vals=oos_vals)
             available = {**oos_vals, **combo_vals}
